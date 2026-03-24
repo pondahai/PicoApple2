@@ -35,16 +35,36 @@
 
 ---
 
-## 🚀 快速開始
+## 🚀 環境架設 (Environment Setup)
 
-### 編譯核心 (Rust)
+在開始編譯前，請確保您的開發環境已完成以下配置：
+
+### 1. Arduino 開發環境
+本專案使用 `arduino-cli` 進行自動化編譯，但底層仍需安裝 RP2040 核心：
+*   **安裝 Arduino IDE**: 建議安裝 2.x 版本。
+*   **安裝 RP2040 核心**: 在 Arduino IDE 的「開發板管理員」中搜尋並安裝 `Raspberry Pi Pico/RP2040` (by Earle F. Philhower, III)。本專案建議版本為 **5.5.1+**。
+*   **FQBN**: `rp2040:rp2040:rpipico`
+
+### 2. Rust 開發環境 (核心模擬器)
+*   **安裝 Rust**: [rustup.rs](https://rustup.rs/)
+*   **安裝編譯目標**: 
+    ```bash
+    rustup target add thumbv6m-none-eabi
+    ```
+
+---
+
+## 🔨 編譯與上傳 (Build & Upload)
+
+### 第一步：編譯核心 (Rust)
+進入 `apple2_core` 目錄並編譯生成靜態庫：
 ```bash
 cd apple2_core
 cargo build --target thumbv6m-none-eabi --release
 ```
 
-### 編譯韌體 (Arduino)
-使用專案根目錄下的 `full_build.bat` 腳本，它會自動同步核心庫並編譯上傳：
+### 第二步：同步與編譯韌體 (Arduino)
+使用專案根目錄下的 `full_build.bat` 腳本，它會自動將 Rust 生成的 `.a` 檔同步至 `src/` 並進行最終編譯與上傳：
 ```bash
 .\full_build.bat
 ```
