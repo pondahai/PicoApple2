@@ -1,0 +1,2 @@
+compiler.c.elf.extra_flags=C:\Users\Dell\Dropbox\Arduino\libraries\Apple2Core\src\libapple2_core.a
+compiler.cpp.elf.extra_flags=C:\Users\Dell\Dropbox\Arduino\libraries\Apple2Core\src\libapple2_core.a

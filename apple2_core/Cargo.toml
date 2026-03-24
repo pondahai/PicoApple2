@@ -1,0 +1,11 @@
+[package]
+name = "apple2-core"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+embedded-alloc = "0.6.0"
+critical-section = { version = "1.1", features = ["restore-state-u8"] }

@@ -1,0 +1,495 @@
+// ==========================================================================
+//   Pico Apple II Emulator - Accurate Hires Color & Corrected Joystick
+// ==========================================================================
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
+#include <SPI.h>
+#include <SD.h>
+#include <Arduino.h>
+#include <Apple2Core.h>
+#include "hardware/gpio.h"
+#include "hardware/sync.h"
+#include "hardware/clocks.h"
+
+// --- GPIO DEFINITIONS ---
+#define PIN_DISPLAY_SCK  18
+#define PIN_DISPLAY_MOSI 19
+#define PIN_DISPLAY_MISO 16
+#define PIN_DISPLAY_CS   17
+#define PIN_DISPLAY_DC   20
+#define PIN_DISPLAY_RST  21
+#define PIN_DISPLAY_BL   22
+#define SD_SCK           10
+#define SD_MOSI          11
+#define SD_MISO          12
+#define SD_CS            13
+#define PIN_JACK_SND     7
+#define DATA_OUT_PIN     15
+#define LATCH_PIN        14
+#define CLOCK_PIN        26
+#define DATA_IN_PIN      27
+
+Adafruit_ILI9341 tft = Adafruit_ILI9341(PIN_DISPLAY_CS, PIN_DISPLAY_DC, PIN_DISPLAY_RST);
+
+// Apple II Palette (RGB565)
+// 0:Black, 1:Magenta, 2:DarkBlue, 3:Purple, 4:DarkGreen, 5:Grey1, 6:MediumBlue, 7:LightBlue,
+// 8:Brown, 9:Orange, 10:Grey2, 11:Pink, 12:LightGreen, 13:Yellow, 14:Aqua, 15:White
+const uint16_t palette[16] = {
+  0x0000, 0xA010, 0x0014, 0xA01F, 0x0500, 0x8410, 0x001F, 0x051F,
+  0xA200, 0xF400, 0x8410, 0xF81F, 0x07E0, 0xFFE0, 0x07FF, 0xFFFF
+};
+
+spin_lock_t *res_lock;
+static uint16_t line_buffer[280];
+
+#define KEY_FIFO_SIZE 32
+volatile uint8_t g_key_fifo[KEY_FIFO_SIZE];
+volatile int g_key_head = 0;
+volatile int g_key_tail = 0;
+volatile uint8_t g_f_key_event = 0;
+volatile bool g_emu_paused = false;
+
+volatile bool joy_left = false, joy_right = false, joy_up = false, joy_down = false;
+volatile bool joy_btn0 = false, joy_btn1 = false;
+
+void pushKey(uint8_t k) {
+  int next = (g_key_head + 1) % KEY_FIFO_SIZE;
+  if (next != g_key_tail) { g_key_fifo[g_key_head] = k; g_key_head = next; }
+}
+uint8_t popKey() {
+  if (g_key_head == g_key_tail) return 0;
+  uint8_t k = g_key_fifo[g_key_tail];
+  g_key_tail = (g_key_tail + 1) % KEY_FIFO_SIZE;
+  return k;
+}
+uint8_t peekKey() {
+  if (g_key_head == g_key_tail) return 0;
+  return g_key_fifo[g_key_tail];
+}
+
+const char keymap_base[8][8] = {
+  { '1', '3', '5', '7', '9', '-', 206, 204 }, { 'q', 'e', 't', 'u', 'o', '[', 207, '\\' },
+  { 'a', 'd', 'g', 'j', 'l', '\'', 205, 208 }, { 'z', 'c', 'b', 'm', '.', 202, 210, 0 },
+  { '2', '4', '6', '8', '0', '=', '`', 0 }, { 'w', 'r', 'y', 'i', 'p', ']', 209, '/' },
+  { 'x', 'f', 'h', 'k', ';', 203, 212, 214 }, { 's', 'v', 'n', ',', 213, ' ', 211, 0 }
+};
+const char keymap_shifted[8][8] = {
+  { '!', '#', '%', '&', '(', '_', 206, 204 }, { 'Q', 'E', 'T', 'U', 'O', '{', 207, '|' },
+  { 'A', 'D', 'G', 'J', 'L', '"', 205, 208 }, { 'Z', 'C', 'B', 'M', '>', 202, 210, 0 },
+  { '@', '$', '^', '*', ')', '+', '~', 0 }, { 'W', 'R', 'Y', 'I', 'P', '}', 209, '?' },
+  { 'X', 'F', 'H', 'K', ':', 203, 212, 214 }, { 'S', 'V', 'N', '<', 213, ' ', 211, 0 }
+};
+
+extern "C" void arduino_toggle_speaker() {
+  static bool s = false; s = !s; gpio_put(PIN_JACK_SND, s);
+}
+extern "C" void Serial_println(const char* msg) { Serial.println(msg); }
+
+File diskFile;
+uint8_t track_buffer[4096]; 
+uint8_t current_disk_track = 0;
+uint8_t last_loaded_track = 0;
+String g_current_disk_path = "/MASTER.DSK";
+
+bool g_show_menu = false;
+String disk_files[20]; 
+int disk_file_count = 0;
+int selected_file_idx = 0;
+
+#define BTN_UP    9
+#define BTN_DOWN  5
+#define BTN_A     2
+#define BTN_B     3
+
+void flushDirtyTrack() {
+  if (!diskFile) return;
+  
+  uint32_t irq = spin_lock_blocking(res_lock);
+  if (apple2_is_track_dirty()) {
+    // 關鍵修正：存檔時使用「這份資料所屬」的磁軌號碼
+    uint8_t target_track = last_loaded_track; 
+    Serial.print("SD: Detected DIRTY track "); Serial.print(target_track); Serial.println(". Preparing to save...");
+    uint8_t valid_count = apple2_get_denibblized_track(track_buffer);
+    spin_unlock(res_lock, irq);
+    
+    if (valid_count >= 1) {
+      uint32_t offset = (uint32_t)target_track * 4096;
+      Serial.print("SD: Writing Track "); Serial.print(target_track); 
+      Serial.print(" (Decoded "); Serial.print(valid_count); Serial.println(" sectors)");
+      
+      // --- [加入 Hex Dump 偵錯] ---
+      Serial.print("SD: Buffer Data Header: ");
+      for (int i = 0; i < 16; i++) {
+        if (track_buffer[i] < 0x10) Serial.print("0");
+        Serial.print(track_buffer[i], HEX); Serial.print(" ");
+      }
+      Serial.println();
+
+      if (diskFile.seek(offset)) {
+        size_t written = diskFile.write(track_buffer, 4096);
+        diskFile.flush();
+        diskFile.close(); // 先關閉，確保 Metadata 與資料同步
+
+        if (written == 4096) {
+          // --- [重新開啟並進行強力驗證] ---
+          diskFile = SD.open(g_current_disk_path, "r+");
+          if (diskFile && diskFile.seek(offset)) {
+            uint8_t verify_buf[64];
+            diskFile.read(verify_buf, 64);
+            bool verify_ok = true;
+            for (int i = 0; i < 64; i++) {
+              if (verify_buf[i] != track_buffer[i]) { 
+                verify_ok = false; 
+                Serial.print("SD VERIFY ERROR at byte "); Serial.print(i);
+                Serial.print(": Exp "); Serial.print(track_buffer[i], HEX);
+                Serial.print(" Got "); Serial.println(verify_buf[i], HEX);
+                break; 
+              }
+            }
+
+            if (verify_ok) {
+              Serial.println("SD: Write & Physical Verify [SUCCESS].");
+            } else {
+              Serial.println("SD ERROR: Data on disk does NOT match buffer!");
+            }
+          } else {
+            Serial.println("SD ERROR: Re-open/Seek failed for verify!");
+          }
+        } else {
+          Serial.print("SD ERROR: Write mismatch! Got "); Serial.println(written);
+        }
+      } else {
+        Serial.print("SD ERROR: Seek failed at offset "); Serial.println(offset);
+      }
+    } else {
+      Serial.println("SD: Skip write, 0 sectors decoded.");
+    }
+  } else {
+    spin_unlock(res_lock, irq);
+  }
+}
+
+void loadSingleTrack(uint8_t track) {
+  if (!diskFile) return;
+  g_emu_paused = true; flushDirtyTrack(); 
+  uint32_t offset = (uint32_t)track * 4096;
+  if (diskFile.seek(offset)) {
+    if (diskFile.read(track_buffer, 4096) == 4096) {
+      uint32_t irq = spin_lock_blocking(res_lock);
+      apple2_load_track(track, track_buffer, 4096);
+      current_disk_track = track;
+      last_loaded_track = track; // 更新目前載入的磁軌號
+      spin_unlock(res_lock, irq);
+    }
+  }
+  g_emu_paused = false; 
+}
+
+uint16_t get_text_row_addr(uint8_t row) {
+  return ((row & 0x07) << 7) | ((row & 0x18) * 5) | 0x0400;
+}
+uint16_t get_hires_row_addr(uint8_t row, bool page2) {
+  uint16_t base = page2 ? 0x4000 : 0x2000;
+  return base | ((row & 0x07) << 10) | ((row & 0x38) << 4) | ((row & 0xC0) >> 1) | ((row & 0xC0) >> 3);
+}
+
+void setup() {
+  set_sys_clock_khz(250000, true);
+  Serial.begin(115200);
+  delay(1000);
+  int lock_num = spin_lock_claim_unused(true);
+  res_lock = spin_lock_init(lock_num);
+  pinMode(PIN_JACK_SND, OUTPUT);
+  uint32_t irq = spin_lock_blocking(res_lock);
+  apple2_init();
+  spin_unlock(res_lock, irq);
+}
+
+void loop() {
+  static unsigned long last_perf_ms = 0;
+  static uint32_t total_cycles_sec = 0;
+  static bool motor_on = false;
+  if (g_emu_paused) { return; }
+  
+  uint32_t irq_joy = spin_lock_blocking(res_lock);
+  apple2_set_paddle(0, joy_left ? 0 : (joy_right ? 255 : 128));
+  apple2_set_paddle(1, joy_up ? 0 : (joy_down ? 255 : 128));
+  apple2_set_button(0, joy_btn0);
+  apple2_set_button(1, joy_btn1);
+  spin_unlock(res_lock, irq_joy);
+
+  if (peekKey() != 0) {
+    uint32_t irq = spin_lock_blocking(res_lock);
+    if (apple2_is_ready_for_key()) { apple2_handle_key(popKey()); }
+    spin_unlock(res_lock, irq);
+  }
+  
+  static int m_cnt = 0;
+  if (m_cnt++ > 10) {
+    uint32_t irq_m = spin_lock_blocking(res_lock);
+    motor_on = apple2_get_disk_motor_status();
+    spin_unlock(res_lock, irq_m);
+    m_cnt = 0;
+  }
+
+  unsigned long start_t = micros();
+  uint32_t irq = spin_lock_blocking(res_lock);
+  uint32_t cycles = apple2_tick(); 
+  spin_unlock(res_lock, irq);
+  total_cycles_sec += cycles;
+
+  if (!motor_on) {
+    unsigned long expected = (unsigned long)((float)cycles / 1.023f);
+    unsigned long actual = micros() - start_t;
+    if (actual < expected) delayMicroseconds(expected - actual);
+  }
+  
+  if (millis() - last_perf_ms > 1000) {
+    total_cycles_sec = 0;
+    last_perf_ms = millis();
+  }
+}
+
+void setup1() {
+  delay(6000); 
+  gpio_init(DATA_OUT_PIN); gpio_set_dir(DATA_OUT_PIN, GPIO_OUT);
+  gpio_init(LATCH_PIN); gpio_set_dir(LATCH_PIN, GPIO_OUT);
+  gpio_init(CLOCK_PIN); gpio_set_dir(CLOCK_PIN, GPIO_OUT);
+  gpio_init(DATA_IN_PIN); gpio_set_dir(DATA_IN_PIN, GPIO_IN);
+  pinMode(PIN_DISPLAY_BL, OUTPUT); digitalWrite(PIN_DISPLAY_BL, HIGH);
+  pinMode(PIN_DISPLAY_CS, OUTPUT); digitalWrite(PIN_DISPLAY_CS, HIGH);
+  pinMode(BTN_UP, INPUT_PULLUP); pinMode(BTN_DOWN, INPUT_PULLUP);
+  pinMode(BTN_A, INPUT_PULLUP); pinMode(BTN_B, INPUT_PULLUP);
+  SPI.setRX(PIN_DISPLAY_MISO); SPI.setTX(PIN_DISPLAY_MOSI); SPI.setSCK(PIN_DISPLAY_SCK);
+  SPI.begin();
+  tft.begin(63000000); tft.setRotation(1); tft.fillScreen(ILI9341_BLACK);
+  SPI1.setRX(SD_MISO); SPI1.setTX(SD_MOSI); SPI1.setSCK(SD_SCK);
+  if (SD.begin(SD_CS, SPI1)) {
+    g_current_disk_path = "/MASTER.DSK";
+    diskFile = SD.open(g_current_disk_path, "r+"); 
+    if (diskFile) {
+      Serial.println("SD: MASTER.DSK opened in r+ mode.");
+    } else {
+      Serial.println("SD: MASTER.DSK r+ FAILED, trying r mode...");
+      diskFile = SD.open(g_current_disk_path, "r");
+    }
+    if (diskFile) { loadSingleTrack(0); }
+  }
+}
+
+uint8_t keyState[8][8] = {0};
+uint8_t lastKeyState[8][8] = {0};
+unsigned long lastKeyTime[8][8] = {0};
+#define DEBOUNCE_DELAY 30
+bool isShiftPressed = false;
+bool isFnPressed = false;
+
+inline void fastWrite(uint pin, bool val) { gpio_put(pin, val); }
+inline bool fastRead(uint pin) { return gpio_get(pin); }
+
+byte myShiftIn(uint8_t dataPin, uint8_t clockPin) {
+  byte data = 0;
+  for (int i = 0; i < 8; i++) {
+    if (fastRead(dataPin)) { data |= (1 << i); }
+    fastWrite(clockPin, 1); delayMicroseconds(1); fastWrite(clockPin, 0);
+  }
+  return data;
+}
+
+void scanDiskFiles() {
+  disk_file_count = 0;
+  File root = SD.open("/");
+  while (true) {
+    File entry = root.openNextFile();
+    if (!entry) break;
+    String name = String(entry.name());
+    if (!entry.isDirectory() && (name.endsWith(".DSK") || name.endsWith(".dsk"))) {
+      if (disk_file_count < 20) { disk_files[disk_file_count++] = name; }
+    }
+    entry.close();
+  }
+  root.close();
+}
+
+void drawDiskMenu() {
+  tft.fillScreen(ILI9341_DARKGREY);
+  tft.drawRect(10, 10, 300, 220, ILI9341_WHITE);
+  tft.setCursor(20, 20); tft.setTextColor(ILI9341_YELLOW); tft.setTextSize(2);
+  tft.println("Select Disk Image:");
+  tft.drawLine(10, 45, 310, 45, ILI9341_WHITE);
+  tft.setTextSize(1);
+  for (int i = 0; i < disk_file_count; i++) {
+    tft.setCursor(30, 55 + (i * 10));
+    if (i == selected_file_idx) { tft.setTextColor(ILI9341_BLACK, ILI9341_GREEN); tft.print("> " + disk_files[i] + " <"); }
+    else { tft.setTextColor(ILI9341_WHITE, ILI9341_DARKGREY); tft.print("  " + disk_files[i]); }
+  }
+}
+
+void loop1() {
+  unsigned long now = millis();
+  char menu_key = 0;
+  for (int row = 0; row < 8; row++) {
+    byte rowScanData = (1 << row);
+    fastWrite(LATCH_PIN, 0);
+    shiftOut(DATA_OUT_PIN, CLOCK_PIN, MSBFIRST, 0);
+    shiftOut(DATA_OUT_PIN, CLOCK_PIN, MSBFIRST, rowScanData);
+    fastWrite(LATCH_PIN, 1); delayMicroseconds(5);
+    fastWrite(LATCH_PIN, 0); delayMicroseconds(1);
+    fastWrite(LATCH_PIN, 1);
+    byte colData = myShiftIn(DATA_IN_PIN, CLOCK_PIN);
+    for (int col = 0; col < 8; col++) keyState[row][7 - col] = (colData & (1 << col));
+  }
+  fastWrite(CLOCK_PIN, 1); delayMicroseconds(2); fastWrite(CLOCK_PIN, 0);
+
+  for (int r = 0; r < 8; r++) {
+    for (int c = 0; c < 8; c++) {
+      bool p = keyState[r][c];
+      if (p != lastKeyState[r][c] && (now - lastKeyTime[r][c] > DEBOUNCE_DELAY)) {
+        lastKeyTime[r][c] = now; lastKeyState[r][c] = p;
+        char bK = keymap_base[r][c];
+        
+        // 搖桿對應 (包含自動歸零)
+        bool is_joy_key = false;
+        if (bK == (char)211) { joy_left = p; is_joy_key = true; }
+        else if (bK == (char)212) { joy_right = p; is_joy_key = true; }
+        else if (bK == (char)209) { joy_up = p; is_joy_key = true; }
+        else if (bK == (char)210) { joy_down = p; is_joy_key = true; }
+        else if (bK == (char)213) { joy_btn0 = p; is_joy_key = true; }
+        else if (bK == (char)214) { joy_btn1 = p; is_joy_key = true; }
+        
+        // 只有在「非選單模式」下才攔截搖桿按鍵，避免它們產生鍵盤字元
+        // 在選單模式中，必須放行讓它們作為選單導航使用
+        if (is_joy_key && !g_show_menu) continue; 
+
+        if (r == 3 && c == 7) { isFnPressed = p; continue; }
+        if (bK == (char)202) isShiftPressed = p;
+        else if (p) {
+          if (isFnPressed && bK >= '1' && bK <= '9') { g_f_key_event = bK - '0'; }
+          else if (!g_show_menu) {
+            char finalK = isShiftPressed ? keymap_shifted[r][c] : bK;
+            uint8_t aK = (uint8_t)finalK;
+            if (finalK == (char)203) aK = 0x0D; else if (finalK == (char)204) aK = 0x08; else if (finalK == (char)207) aK = 0x1B;
+            else if (aK >= 'a' && aK <= 'z') aK -= 32;
+            pushKey(aK);
+          } else { menu_key = bK; }
+        }
+      }
+    }
+  }
+
+  uint32_t irq_sys = spin_lock_blocking(res_lock);
+  int32_t reload_track = apple2_needs_disk_reload();
+  bool cur_m_s = apple2_get_disk_motor_status();
+  spin_unlock(res_lock, irq_sys);
+
+  if (reload_track >= 0) { loadSingleTrack((uint8_t)reload_track); }
+
+  if (g_f_key_event == 1) { g_f_key_event = 0; uint32_t ir = spin_lock_blocking(res_lock); apple2_warm_reset(); spin_unlock(res_lock, ir); }
+  if (g_f_key_event == 2) { 
+    g_f_key_event = 0; uint32_t ir = spin_lock_blocking(res_lock); apple2_reset(); spin_unlock(res_lock, ir); 
+    tft.fillScreen(ILI9341_BLACK); loadSingleTrack(0);
+  }
+  if (g_f_key_event == 3) { g_f_key_event = 0; scanDiskFiles(); if (disk_file_count > 0) { g_emu_paused = true; g_show_menu = true; selected_file_idx = 0; drawDiskMenu(); } }
+
+  if (g_show_menu) {
+    static unsigned long last_m_ms = 0;
+    bool b_up = (digitalRead(BTN_UP) == LOW) || (menu_key == (char)209);
+    bool b_down = (digitalRead(BTN_DOWN) == LOW) || (menu_key == (char)210);
+    bool b_a = (digitalRead(BTN_A) == LOW) || (menu_key == (char)203);
+    bool b_b = (digitalRead(BTN_B) == LOW) || (menu_key == (char)207);
+    if (millis() - last_m_ms > 200) {
+      if (b_up) { selected_file_idx = (selected_file_idx - 1 + disk_file_count) % disk_file_count; drawDiskMenu(); last_m_ms = millis(); }
+      else if (b_down) { selected_file_idx = (selected_file_idx + 1) % disk_file_count; drawDiskMenu(); last_m_ms = millis(); }
+      else if (b_a) {
+        if (disk_file_count > 0) {
+          g_emu_paused = true; flushDirtyTrack(); 
+          if (diskFile) diskFile.close(); 
+          g_current_disk_path = "/" + disk_files[selected_file_idx];
+          diskFile = SD.open(g_current_disk_path, "r+"); 
+          if (diskFile) {
+            Serial.print("SD: Switched to "); Serial.print(g_current_disk_path); Serial.println(" (r+ mode).");
+          } else {
+            Serial.print("SD: Switched to "); Serial.print(g_current_disk_path); Serial.println(" (r mode).");
+            diskFile = SD.open(g_current_disk_path, "r");
+          }
+          loadSingleTrack(0);
+        }
+        g_show_menu = false; g_emu_paused = false; tft.fillScreen(ILI9341_BLACK); last_m_ms = millis();
+      }
+      else if (b_b) { g_show_menu = false; g_emu_paused = false; tft.fillScreen(ILI9341_BLACK); last_m_ms = millis(); }
+    }
+    return;
+  }
+
+  static unsigned long last_f = 0;
+  static bool prev_m_s = false;
+  if (prev_m_s && !cur_m_s) { g_emu_paused = true; flushDirtyTrack(); g_emu_paused = false; }
+  prev_m_s = cur_m_s;
+
+  if (millis() - last_f > 40) { 
+    tft.fillCircle(305, 15, 5, cur_m_s ? ILI9341_RED : ILI9341_BLACK); 
+    uint32_t irq = spin_lock_blocking(res_lock);
+    const uint8_t* ram = apple2_get_ram_ptr();
+    const uint8_t* char_rom = apple2_get_char_rom_ptr();
+    uint8_t v_mode = apple2_get_video_mode();
+    spin_unlock(res_lock, irq);
+    
+    bool blink_on = (millis() >> 8) & 0x01; // 約 256ms 閃爍週期
+
+    if (ram && char_rom) {
+      bool text_m = (v_mode & 0x01) != 0; bool mixed_m = (v_mode & 0x02) != 0; bool page2 = (v_mode & 0x04) != 0; bool hires_m = (v_mode & 0x08) != 0;
+      tft.startWrite(); tft.setAddrWindow(20, 24, 280, 192);
+      for (int y = 0; y < 192; y++) {
+        if (text_m || (mixed_m && y >= 160)) {
+          uint16_t row_addr = get_text_row_addr(y / 8);
+          for (int col = 0; col < 40; col++) {
+            uint8_t raw_char = ram[row_addr + col];
+            uint8_t char_idx = raw_char & 0x7F;
+
+            // Apple II 字符映射修正 (處理 Inverse/Flashing 區域)
+            if (raw_char < 0x80) {
+                if (char_idx < 0x20) char_idx += 0x40;      // $00-$1F -> $40-$5F (@.._)
+                else if (char_idx >= 0x60) char_idx -= 0x40; // $60-$7F -> $20-$3F (Space..?)
+            }
+
+            bool invert = false;
+            if (raw_char < 0x40) invert = true;            // Inverse Mode
+            else if (raw_char < 0x80) invert = blink_on;    // Flashing Mode (游標所在地)
+
+            uint8_t font_row = char_rom[char_idx * 8 + (y % 8)];
+            for (int x = 0; x < 7; x++) { 
+                bool pixel = (font_row & (1 << (6 - x))) != 0;
+                if (invert) pixel = !pixel;
+                line_buffer[col * 7 + x] = pixel ? 0xFFFF : 0x0000; 
+            }
+          }
+        } else if (hires_m) {
+          uint16_t row_addr = get_hires_row_addr(y, page2);
+          bool p_bit = false;
+          for (int col = 0; col < 40; col++) {
+            uint8_t b = ram[row_addr + col];
+            bool shift = (b & 0x80) != 0;
+            for (int bit = 0; bit < 7; bit++) {
+              bool c_bit = (b & (1 << bit)) != 0;
+              bool n_bit = (bit < 6) ? ((b & (1 << (bit + 1))) != 0) : ((col < 39) ? ((ram[row_addr + col + 1] & 0x01) != 0) : false);
+              uint16_t color = 0;
+              if (c_bit) {
+                if (p_bit || n_bit) color = 0xFFFF;
+                else {
+                  bool even = ((col * 7 + bit) % 2) == 0;
+                  if (!shift) color = even ? palette[3] : palette[12]; // Purple/Green
+                  else color = even ? palette[6] : palette[9]; // Blue/Orange
+                }
+              }
+              line_buffer[col * 7 + bit] = color; p_bit = c_bit;
+            }
+          }
+        }
+        tft.writePixels(line_buffer, 280); 
+      }
+      tft.endWrite();
+    }
+    last_f = millis();
+  }
+}

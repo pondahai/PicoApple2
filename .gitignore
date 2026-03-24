@@ -1,0 +1,31 @@
+# Disk Images & ROMs (Copyrighted)
+*.DSK
+*.dsk
+roms/
+*.rom
+*.ROM
+
+# Rust build artifacts
+apple2_core/target/
+**/*.rs.bk
+
+# Arduino Build Artifacts
+*.uf2
+*.elf
+*.bin
+*.hex
+*.map
+
+# Static Libraries (generated from source)
+libapple2_core.a
+
+# Tools & Local Config (Don't track large binaries or personal IDE settings)
+arduino-cli.exe
+.claude/
+.gemini/
+.vscode/
+build/
+
+# OS Files
+Thumbs.db
+.DS_Store

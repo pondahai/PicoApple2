@@ -1,0 +1,45 @@
+#ifndef APPLE2MEM_H
+#define APPLE2MEM_H
+
+#include <stdint.h>
+#include <string.h>
+
+class Apple2Mem {
+public:
+    uint8_t ram[49152];    // 48KB (0x0000 - 0xBFFF)
+    uint8_t rom[12288];    // 12KB (0xD000 - 0xFFFF)
+    uint8_t lc_ram[16384]; // 16KB Language Card RAM
+
+    // Video Soft Switches
+    bool text_mode;
+    bool mixed_mode;
+    bool page2;
+    bool hires_mode;
+
+    uint8_t keyboard_latch;
+
+    // Language Card State
+    bool lc_read_enable;
+    bool lc_write_enable;
+    bool lc_bank2;
+    uint16_t lc_pre_write_switch;
+
+    // Speaker state
+    bool speaker;
+
+    Apple2Mem();
+    void power_on_reset();
+    void load_rom(const uint8_t* data, uint32_t len);
+
+    uint8_t read(uint16_t addr);
+    void write(uint16_t addr, uint8_t data);
+
+    inline uint16_t read_word(uint16_t addr) {
+        return (uint16_t)read(addr) | ((uint16_t)read(addr + 1) << 8);
+    }
+
+private:
+    uint16_t canonical_lc_switch(uint16_t addr);
+};
+
+#endif
