@@ -35,6 +35,21 @@
 
 ---
 
+## 🔌 GPIO 接線表 (Pin Mapping)
+
+| 類別 | 功能 | Pico 引腳 (GPIO) | 說明 |
+| :--- | :--- | :--- | :--- |
+| **顯示器 (SPI0)** | SCK / MOSI / MISO | 18 / 19 / 16 | 連接至 ILI9341 |
+| | CS / DC / RST / BL | 17 / 20 / 21 / 22 | |
+| **SD 卡 (SPI1)** | SCK / MOSI / MISO / CS | 10 / 11 / 12 / 13 | 連接至 SD 卡模組 |
+| **音效 (Audio)** | Sound Out | 7 | 1-bit 輸出 (建議接電晶體放大) |
+| **鍵盤矩陣** | Data Out / Latch | 15 / 14 | 連接至 74HC595 / 74HC165 |
+| | Clock / Data In | 26 / 27 | |
+| **選單按鈕** | Up / Down | 9 / 5 | 輔助導航按鈕 (Pull-up) |
+| | Button A / B | 2 / 3 | A:確認, B:返回 |
+
+---
+
 ## 🚀 環境架設 (Environment Setup)
 
 在開始編譯前，請確保您的開發環境已完成以下配置：
