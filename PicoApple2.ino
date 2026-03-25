@@ -250,6 +250,8 @@ void loop() {
           if (g_show_menu) g_menu_cmd = 3; // Enter in menu
         }
         else if (sK >= 'a' && sK <= 'z') sK -= 32; 
+        
+        // Control characters (0x01-0x1A for CTRL+A..Z) are kept as is
         pushKey(sK);
       }
     } else if (esc_state == 1) { // Expecting '[' or 'O'
@@ -359,6 +361,7 @@ unsigned long lastKeyTime[8][8] = {0};
 #define DEBOUNCE_DELAY 30
 bool isShiftPressed = false;
 bool isFnPressed = false;
+bool isCtrlPressed = false;
 
 inline void fastWrite(uint pin, bool val) { gpio_put(pin, val); }
 inline bool fastRead(uint pin) { return gpio_get(pin); }
@@ -438,14 +441,32 @@ void loop1() {
         if (is_joy_key && !g_show_menu) continue; 
 
         if (r == 3 && c == 7) { isFnPressed = p; continue; }
-        if (bK == (char)202) isShiftPressed = p;
-        else if (p) {
+        if (bK == (char)202) { isShiftPressed = p; continue; }
+        if (bK == (char)205) { isCtrlPressed = p; continue; }
+        
+        if (p) {
           if (isFnPressed && bK >= '1' && bK <= '9') { g_f_key_event = bK - '0'; }
           else if (!g_show_menu) {
             char finalK = isShiftPressed ? keymap_shifted[r][c] : bK;
             uint8_t aK = (uint8_t)finalK;
-            if (finalK == (char)203) aK = 0x0D; else if (finalK == (char)204) aK = 0x08; else if (finalK == (char)207) aK = 0x1B;
-            else if (aK >= 'a' && aK <= 'z') aK -= 32;
+            if (finalK == (char)203) aK = 0x0D; 
+            else if (finalK == (char)204) aK = 0x08; 
+            else if (finalK == (char)207) aK = 0x1B;
+            
+            // --- [處理 CTRL 組合鍵] ---
+            if (isCtrlPressed) {
+              if (aK >= 'a' && aK <= 'z') aK -= 96;      // a-z -> 0x01-0x1A
+              else if (aK >= 'A' && aK <= 'Z') aK -= 64; // A-Z -> 0x01-0x1A
+              else if (aK == '@') aK = 0x00;
+              else if (aK == '[') aK = 0x1B;
+              else if (aK == '\\') aK = 0x1C;
+              else if (aK == ']') aK = 0x1D;
+              else if (aK == '^') aK = 0x1E;
+              else if (aK == '_') aK = 0x1F;
+            } else if (aK >= 'a' && aK <= 'z') {
+              aK -= 32; // Normal uppercase
+            }
+            
             pushKey(aK);
           } else { menu_key = bK; }
         }

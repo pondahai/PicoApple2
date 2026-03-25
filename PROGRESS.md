@@ -18,7 +18,8 @@
     *   實作 **Safe Write-back**：物理驗證磁軌寫入。
 *   **⌨️ 鍵盤系統**: 
     *   實體鍵盤: 支援 74HC595/74HC165 驅動的鍵盤，並包含熱鍵選單。
-    *   **互動式終端機 (Serial Terminal)**: 支援透過 USB Serial 輸入，實作 ANSI 轉義序列解析（支援方向鍵、F1-F4、PGUP/PGDN）。
+    *   **CTRL 鍵支援**: 成功映射實體 `CTRL` 鍵（代碼 205），支援完整的組合鍵輸入（如 `CTRL-C`）。
+    *   **互動式終端機 (Serial Terminal)**: 支援透過 USB Serial 輸入，實作 ANSI 轉義序列解析，並修正了控制碼（如 `CTRL-C`）的透傳處理。
 *   **🛠️ 開發工具鏈**:
     *   **環境自動掃描**: 實作 `scan_env.ps1` 與 `check_env.bat`，自動從 Arduino IDE 設定抓取路徑，達成零硬編碼配置。
     *   **Git 管理**: 修正排除規則，將自動產生的 `build_env.bat` 排除於版本控制之外，保護本機開發路徑。
