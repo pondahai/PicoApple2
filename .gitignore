@@ -20,6 +20,7 @@ apple2_core/target/
 libapple2_core.a
 
 # Tools & Local Config (Don't track large binaries or personal IDE settings)
+build_env.bat
 arduino-cli.exe
 .claude/
 .gemini/
