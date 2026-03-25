@@ -99,8 +99,12 @@ int selected_file_idx = 0;
 
 #define BTN_UP    9
 #define BTN_DOWN  5
+#define BTN_LEFT  8
+#define BTN_RIGHT 6
 #define BTN_A     2
 #define BTN_B     3
+#define BTN_MENU  4
+#define BTN_ALT   28
 
 void flushDirtyTrack() {
   if (!diskFile) return;
@@ -337,7 +341,9 @@ void setup1() {
   pinMode(PIN_DISPLAY_BL, OUTPUT); digitalWrite(PIN_DISPLAY_BL, HIGH);
   pinMode(PIN_DISPLAY_CS, OUTPUT); digitalWrite(PIN_DISPLAY_CS, HIGH);
   pinMode(BTN_UP, INPUT_PULLUP); pinMode(BTN_DOWN, INPUT_PULLUP);
+  pinMode(BTN_LEFT, INPUT_PULLUP); pinMode(BTN_RIGHT, INPUT_PULLUP);
   pinMode(BTN_A, INPUT_PULLUP); pinMode(BTN_B, INPUT_PULLUP);
+  pinMode(BTN_MENU, INPUT_PULLUP); pinMode(BTN_ALT, INPUT_PULLUP);
   SPI.setRX(PIN_DISPLAY_MISO); SPI.setTX(PIN_DISPLAY_MOSI); SPI.setSCK(PIN_DISPLAY_SCK);
   SPI.begin();
   tft.begin(63000000); tft.setRotation(1); tft.fillScreen(ILI9341_BLACK);
@@ -407,6 +413,20 @@ void drawDiskMenu() {
 void loop1() {
   unsigned long now = millis();
   char menu_key = 0;
+
+  // --- [掃描實體按鈕 (GPIO)] ---
+  joy_up = (digitalRead(BTN_UP) == LOW);
+  joy_down = (digitalRead(BTN_DOWN) == LOW);
+  joy_left = (digitalRead(BTN_LEFT) == LOW);
+  joy_right = (digitalRead(BTN_RIGHT) == LOW);
+  joy_btn0 = (digitalRead(BTN_A) == LOW);
+  joy_btn1 = (digitalRead(BTN_B) == LOW);
+
+  static bool last_menu_p = false;
+  bool menu_p = (digitalRead(BTN_MENU) == LOW);
+  if (menu_p && !last_menu_p) { g_f_key_event = 3; } // MENU -> Disk Menu
+  last_menu_p = menu_p;
+
   for (int row = 0; row < 8; row++) {
     byte rowScanData = (1 << row);
     fastWrite(LATCH_PIN, 0);

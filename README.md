@@ -46,7 +46,10 @@
 | **鍵盤矩陣** | Data Out / Latch | 15 / 14 | 連接至 74HC595 / 74HC165 |
 | | Clock / Data In | 26 / 27 | |
 | **選單按鈕** | Up / Down | 9 / 5 | 輔助導航按鈕 (Pull-up) |
-| | Button A / B | 2 / 3 | A:確認, B:返回 |
+| | Left / Right | 8 / 6 | 搖桿 X 軸模擬 |
+| | Button A / B | 2 / 3 | A:確認 (PB0), B:返回 (PB1) |
+| | Menu (Start) | 4 | 進入磁碟選擇選單 (F3) |
+| | ALT | 28 | 預留功能鍵 |
 
 ---
 
