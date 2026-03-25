@@ -206,12 +206,87 @@ void setup() {
   spin_unlock(res_lock, irq);
 }
 
+volatile bool g_monitor_mode = false;
+
+volatile uint8_t g_menu_cmd = 0; // 0:None, 1:Up, 2:Down, 3:Enter, 4:Esc
+
 void loop() {
   static unsigned long last_perf_ms = 0;
   static uint32_t total_cycles_sec = 0;
   static bool motor_on = false;
-  if (g_emu_paused) { return; }
+  if (g_emu_paused && !g_monitor_mode && !g_show_menu) { return; }
+
+  // --- [Terminal Keyboard & ANSI Parser] ---
+  static int esc_state = 0;
+  static char esc_buf[8];
+  static int esc_idx = 0;
+
+  while (Serial.available() > 0) {
+    uint8_t sK = Serial.read();
+
+    if (g_monitor_mode) {
+      if (sK == 0x1B) { // ESC to exit monitor
+        g_monitor_mode = false; g_emu_paused = false;
+        Serial.println("\n[Monitor Mode] Exited.");
+        continue;
+      }
+      Serial.print("Raw Hex: 0x"); if (sK < 0x10) Serial.print("0");
+      Serial.print(sK, HEX); Serial.print(" ('"); Serial.print((char)sK); Serial.println("')");
+      continue;
+    }
+
+    if (esc_state == 0) {
+      if (sK == 0x1B) { esc_state = 1; esc_idx = 0; } // Start of ESC sequence
+      else if (sK == 0x0B) { // Ctrl+K (0x0B) to enter Monitor Mode
+        g_monitor_mode = true; g_emu_paused = true;
+        Serial.println("\n[Monitor Mode] Started. Press ESC to exit.");
+        Serial.println("Press any key to see its Hex code:");
+      }
+      else {
+        // Normal character processing
+        if (sK == 127 || sK == 8) sK = 0x08; 
+        else if (sK == '\r' || sK == '\n') {
+          sK = 0x0D; 
+          if (g_show_menu) g_menu_cmd = 3; // Enter in menu
+        }
+        else if (sK >= 'a' && sK <= 'z') sK -= 32; 
+        pushKey(sK);
+      }
+    } else if (esc_state == 1) { // Expecting '[' or 'O'
+      if (sK == '[' || sK == 'O') { esc_buf[esc_idx++] = sK; esc_state = 2; }
+      else { esc_state = 0; } // Invalid sequence
+    } else if (esc_state == 2) { // Gathering parameters
+      if (esc_idx < 7) esc_buf[esc_idx++] = sK;
+      // End of sequence detection
+      if ((sK >= 'A' && sK <= 'Z') || sK == '~') {
+        // Parse results
+        if (esc_buf[0] == '[') {
+          if (sK == 'A') { joy_up = true; delay(50); joy_up = false; if (g_show_menu) g_menu_cmd = 1; }    // Arrow Up
+          else if (sK == 'B') { joy_down = true; delay(50); joy_down = false; if (g_show_menu) g_menu_cmd = 2; } // Arrow Down
+          else if (sK == 'C') { joy_right = true; delay(50); joy_right = false; } // Arrow Right
+          else if (sK == 'D') { joy_left = true; delay(50); joy_left = false; } // Arrow Left
+          else if (String(esc_buf).indexOf("11~") >= 0) g_f_key_event = 1; // F1
+          else if (String(esc_buf).indexOf("12~") >= 0) g_f_key_event = 2; // F2
+          else if (String(esc_buf).indexOf("13~") >= 0) g_f_key_event = 3; // F3
+          else if (String(esc_buf).indexOf("15~") >= 0) g_f_key_event = 4; // F4
+          else if (sK == '~') {
+            if (String(esc_buf).indexOf("5~") >= 0) { joy_btn0 = true; delay(100); joy_btn0 = false; } // PGUP
+            else if (String(esc_buf).indexOf("6~") >= 0) { joy_btn1 = true; delay(100); joy_btn1 = false; } // PGDN
+          }
+        } else if (esc_buf[0] == 'O') { // Some terminals send SS3 sequences
+          if (sK == 'P') g_f_key_event = 1; // F1
+          else if (sK == 'Q') g_f_key_event = 2; // F2
+          else if (sK == 'R') g_f_key_event = 3; // F3
+          else if (sK == 'S') g_f_key_event = 4; // F4
+        }
+        esc_state = 0;
+      }
+    }
+  }
   
+  if (g_monitor_mode) return; // In monitor mode, skip emulation
+  if (g_show_menu) return;    // In menu mode, skip emulation loop
+
   uint32_t irq_joy = spin_lock_blocking(res_lock);
   apple2_set_paddle(0, joy_left ? 0 : (joy_right ? 255 : 128));
   apple2_set_paddle(1, joy_up ? 0 : (joy_down ? 255 : 128));

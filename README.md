@@ -80,22 +80,41 @@
 
 ## 🔨 編譯與上傳 (Build & Upload)
 
-### 第一步：編譯核心 (Rust)
-進入 `apple2_core` 目錄並編譯生成靜態庫：
+本專案已實作 **動態環境掃描系統**，會自動從您的 Arduino IDE 設定中抓取工具鏈路徑。
+
+### 第一次執行 (環境檢查)
+在開始編譯前，請先執行 `check_env.bat`。此腳本會：
+1. 掃描 `~/.arduinoIDE/arduino-cli.yaml` 取得路徑。
+2. 自動尋找 `arduino-cli.exe` 與 `picotool.exe` 的實際位置。
+3. 產生 `build_env.bat` 環境設定檔。
+4. 在視窗中顯示掃描結果供您確認。
+
 ```bash
-cd apple2_core
-cargo build --target thumbv6m-none-eabi --release
+.\check_env.bat
 ```
 
-### 第二步：同步與編譯韌體 (Arduino)
-使用專案根目錄下的 `full_build.bat` 腳本，它會自動將 Rust 生成的 `.a` 檔同步至 `src/` 並進行最終編譯與上傳：
-```bash
-.\full_build.bat
-```
+### 快速編譯與上傳 (自動化腳本)
+確認環境正確後，您可以使用以下腳本進行開發：
+
+*   **一鍵全編譯** (`full_build.bat`):
+    自動執行環境掃描 -> 編譯 Rust 核心 -> 同步靜態庫 -> 編譯 `PicoApple2.ino` -> 自動透過 1200bps 重置並上傳至 Pico。
+    ```bash
+    .\full_build.bat
+    ```
+*   **僅更新 Rust 核心** (`build_rust.bat`):
+    當您修改了 `apple2_core/` 下的 Rust 代碼時，執行此腳本會編譯並將產出同步至 Arduino 程式庫目錄，之後您可以直接在 Arduino IDE 中點擊上傳。
 
 ---
 
-## 🎹 控制說明
+## 📂 專案結構 (Project Structure)
+
+*   `PicoApple2.ino`: 主程式進入點（原 `pico_apple2_emulator.ino`）。
+*   `apple2_core/`: Rust 撰寫的 Apple II 模擬器核心。
+*   `scripts/scan_env.ps1`: 動態環境掃描核心腳本。
+*   `check_env.bat`: 環境驗證工具。
+*   `Apple2Core.h`: C/Rust FFI 接口定義。
+*   `src/`: 存放編譯後的 `libapple2_core.a` 靜態庫。
+
 
 | 功能 | 組合鍵 / 按鍵 |
 | :--- | :--- |

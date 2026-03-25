@@ -25,13 +25,39 @@ while ($true) {
             $port.Open()
             Write-Host "[CONNECTED] $currentPort is online.`n" -ForegroundColor Green
             
-            # 高速讀取迴圈
+            # 雙向讀寫迴圈
             while ($port.IsOpen) {
+                # 1. 接收 Pico 傳回的資料 (輸出至螢幕)
                 if ($port.BytesToRead -gt 0) {
                     $data = $port.ReadExisting()
                     Write-Host $data -NoNewline
                 }
-                Start-Sleep -Milliseconds 1 # 降到 1ms 達成「瞬間」感
+
+                # 2. 捕捉鍵盤輸入 (傳送至 Pico)
+                if ([Console]::KeyAvailable) {
+                    $keyInfo = [Console]::ReadKey($true)
+                    $esc = [char]27
+                    
+                    # 處理特殊按鍵的轉義序列 (ANSI)
+                    if ($keyInfo.Key -eq 'UpArrow') { $port.Write("${esc}[A") }
+                    elseif ($keyInfo.Key -eq 'DownArrow') { $port.Write("${esc}[B") }
+                    elseif ($keyInfo.Key -eq 'RightArrow') { $port.Write("${esc}[C") }
+                    elseif ($keyInfo.Key -eq 'LeftArrow') { $port.Write("${esc}[D") }
+                    elseif ($keyInfo.Key -eq 'F1') { $port.Write("${esc}OP") }
+                    elseif ($keyInfo.Key -eq 'F2') { $port.Write("${esc}OQ") }
+                    elseif ($keyInfo.Key -eq 'F3') { $port.Write("${esc}OR") }
+                    elseif ($keyInfo.Key -eq 'F4') { $port.Write("${esc}[15~") }
+                    elseif ($keyInfo.Key -eq 'PageUp') { $port.Write("${esc}[5~") }
+                    elseif ($keyInfo.Key -eq 'PageDown') { $port.Write("${esc}[6~") }
+                    elseif ($keyInfo.Key -eq 'Backspace') { $port.Write([char]8) }
+                    elseif ($keyInfo.Key -eq 'Enter') { $port.Write([char]13) }
+                    elseif ($keyInfo.Key -eq 'Escape') { $port.Write("${esc}") }
+                    else {
+                        # 傳送一般字元
+                        $port.Write($keyInfo.KeyChar)
+                    }
+                }
+                Start-Sleep -Milliseconds 1 
             }
         } catch {
             Write-Host "`n[LOST] Connection to $currentPort interrupted." -ForegroundColor Red
