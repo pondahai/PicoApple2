@@ -1,14 +1,20 @@
 @echo off
 setlocal enabledelayedexpansion
 
-:: --- [配置區] ---
-set "FQBN=rp2040:rp2040:rpipico"
-set "PROJECT_ROOT=%~dp0"
-set "ARDUINO_CLI=%PROJECT_ROOT%arduino-cli.exe"
-set "CUSTOM_LIB_PATH=C:\Users\Dell\Dropbox\Arduino\libraries"
+:: --- [Dynamic Environment Setup] ---
+set "SCRIPT_DIR=%~dp0"
+echo Scanning environment...
+powershell -ExecutionPolicy Bypass -File "%SCRIPT_DIR%scripts\scan_env.ps1"
+if %errorlevel% neq 0 ( echo [ERROR] Environment scan failed. & pause & exit /b )
+call "%SCRIPT_DIR%build_env.bat"
+
+:: Use variables from build_env.bat
+set "FQBN=%FQBN%"
+set "ARDUINO_CLI=%ARDUINO_CLI_PATH%"
+set "CUSTOM_LIB_PATH=%ARDUINO_USER_LIB_PATH%"
+set "PICOTOOL=%PICOTOOL_PATH%"
 set "TEST_SKETCH=sd_test\sd_test.ino"
 set "OUTPUT_DIR=build_sd_test"
-set "PICOTOOL=C:\Users\Dell\AppData\Local\Arduino15\packages\rp2040\tools\pqt-picotool\4.1.0-1aec55e\picotool.exe"
 
 echo ========================================================
 echo [1/4] Compiling SD Test Sketch (Pre-linked Core)...

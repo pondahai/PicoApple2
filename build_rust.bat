@@ -1,10 +1,16 @@
 @echo off
 setlocal enabledelayedexpansion
 
+:: --- [Dynamic Environment Setup] ---
+set "SCRIPT_DIR=%~dp0"
+echo Scanning environment...
+powershell -ExecutionPolicy Bypass -File "%SCRIPT_DIR%scripts\scan_env.ps1"
+if %errorlevel% neq 0 ( echo [ERROR] Environment scan failed. & pause & exit /b )
+call "%SCRIPT_DIR%build_env.bat"
+
 :: --- 配置區 ---
-set "PROJECT_ROOT=%~dp0"
 set "RUST_PROJECT_DIR=%PROJECT_ROOT%apple2_core"
-set "ARDUINO_LIB_SRC=C:\Users\Dell\Dropbox\Arduino\libraries\Apple2Core\src"
+set "ARDUINO_LIB_SRC=%ARDUINO_USER_LIB_PATH%\Apple2Core\src"
 set "TARGET=thumbv6m-none-eabi"
 set "LIB_NAME=libapple2_core.a"
 set "HEADER_NAME=Apple2Core.h"
