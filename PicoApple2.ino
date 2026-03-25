@@ -349,15 +349,36 @@ void setup1() {
   tft.begin(63000000); tft.setRotation(1); tft.fillScreen(ILI9341_BLACK);
   SPI1.setRX(SD_MISO); SPI1.setTX(SD_MOSI); SPI1.setSCK(SD_SCK);
   if (SD.begin(SD_CS, SPI1)) {
-    g_current_disk_path = "/MASTER.DSK";
+    // --- [新增：讀取最後一次使用的磁碟紀錄] ---
+    String lastDisk = "/MASTER.DSK";
+    if (SD.exists("/LASTDISK.TXT")) {
+      File f = SD.open("/LASTDISK.TXT", "r");
+      if (f) {
+        String s = f.readStringUntil('\n');
+        s.trim();
+        if (s.length() > 0) lastDisk = s;
+        f.close();
+        Serial.print("SD: Found last disk record: "); Serial.println(lastDisk);
+      }
+    }
+
+    g_current_disk_path = lastDisk;
     diskFile = SD.open(g_current_disk_path, "r+"); 
     if (diskFile) {
-      Serial.println("SD: MASTER.DSK opened in r+ mode.");
+      Serial.print("SD: "); Serial.print(g_current_disk_path); Serial.println(" opened in r+ mode.");
     } else {
-      Serial.println("SD: MASTER.DSK r+ FAILED, trying r mode...");
+      Serial.print("SD: "); Serial.print(g_current_disk_path); Serial.println(" r+ FAILED, trying r mode...");
       diskFile = SD.open(g_current_disk_path, "r");
     }
     if (diskFile) { loadSingleTrack(0); }
+    else {
+      // 如果連最後紀錄都開不起來，最後回退到 MASTER.DSK
+      if (g_current_disk_path != "/MASTER.DSK") {
+        g_current_disk_path = "/MASTER.DSK";
+        diskFile = SD.open(g_current_disk_path, "r");
+        if (diskFile) loadSingleTrack(0);
+      }
+    }
   }
 }
 
@@ -525,7 +546,16 @@ void loop1() {
           diskFile = SD.open(g_current_disk_path, "r+"); 
           if (diskFile) {
             Serial.print("SD: Switched to "); Serial.print(g_current_disk_path); Serial.println(" (r+ mode).");
-          } else {
+            // --- [新增：儲存最後一次使用的磁碟紀錄 (安全覆寫)] ---
+            if (SD.exists("/LASTDISK.TXT")) { SD.remove("/LASTDISK.TXT"); }
+            File f = SD.open("/LASTDISK.TXT", FILE_WRITE);
+            if (f) {
+              f.println(g_current_disk_path);
+              f.close();
+              Serial.println("SD: Saved last disk record to /LASTDISK.TXT");
+            }
+          }
+ else {
             Serial.print("SD: Switched to "); Serial.print(g_current_disk_path); Serial.println(" (r mode).");
             diskFile = SD.open(g_current_disk_path, "r");
           }
