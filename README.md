@@ -67,9 +67,12 @@
 在開始編譯前，請確保您的開發環境已完成以下配置：
 
 ### 1. Arduino 開發環境
-本專案使用 `arduino-cli` 進行自動化編譯，但底層仍需安裝 RP2040 核心：
-*   **安裝 Arduino IDE**: 建議安裝 2.x 版本。
-*   **安裝 RP2040 核心**: 在 Arduino IDE 的「開發板管理員」中搜尋並安裝 `Raspberry Pi Pico/RP2040` (by Earle F. Philhower, III)。本專案建議版本為 **5.5.1+**。
+本專案建議使用 **Arduino IDE 2.x** 進行基礎設定，並透過自動化腳本進行編譯。
+
+*   **安裝 RP2040 核心**: 在 Arduino IDE 的「開發板管理員」中搜尋並安裝 `Raspberry Pi Pico/RP2040` (by Earle F. Philhower, III)。**版本要求: 5.5.1+**。
+*   **安裝必要程式庫**: 在「程式庫管理員」中搜尋並安裝以下元件：
+    1.  **Adafruit GFX Library**
+    2.  **Adafruit ILI9341**
 *   **FQBN**: `rp2040:rp2040:rpipico`
 
 ### 2. Rust 開發環境 (核心模擬器)
