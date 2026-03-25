@@ -560,6 +560,19 @@ void loop1() {
               line_buffer[col * 7 + bit] = color; p_bit = c_bit;
             }
           }
+        } else {
+          // --- [補全 Lo-Res (LGR) 渲染邏輯] ---
+          uint16_t row_addr = get_text_row_addr(y / 8);
+          // 每一個 Byte 代表上下兩個 4x7 的色塊。y % 8 < 4 畫上方(低4位)，>= 4 畫下方(高4位)
+          bool is_lower_nibble = (y % 8) < 4;
+          for (int col = 0; col < 40; col++) {
+            uint8_t val = ram[row_addr + col];
+            uint8_t color_idx = is_lower_nibble ? (val & 0x0F) : (val >> 4);
+            uint16_t color = palette[color_idx & 0x0F];
+            for (int x = 0; x < 7; x++) {
+              line_buffer[col * 7 + x] = color;
+            }
+          }
         }
         tft.writePixels(line_buffer, 280); 
       }

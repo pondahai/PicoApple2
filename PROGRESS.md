@@ -7,6 +7,9 @@
 
 ## ✅ 已完成功能
 *   **🦀 Rust 核心集成**: 完善的 6502 模擬、記憶體映射與 Disk II 控制。
+*   **🎨 繪圖系統**:
+    *   **Text/Hires**: 支援文字與高解析度模式，具備正確的閃爍、反白與 NTSC 偽色模擬。
+    *   **Lo-Res**: 補全低解析度繪圖模式 (LGR 40x48) 與 Mixed Mode 渲染。
 *   **⚡ 效能優化**: 
     *   RP2040 穩定超頻至 **250MHz**。
     *   實作 **Disk Boost**：磁碟馬達運轉時自動放開 CPU 限速。
@@ -18,6 +21,7 @@
     *   **互動式終端機 (Serial Terminal)**: 支援透過 USB Serial 輸入，實作 ANSI 轉義序列解析（支援方向鍵、F1-F4、PGUP/PGDN）。
 *   **🛠️ 開發工具鏈**:
     *   **環境自動掃描**: 實作 `scan_env.ps1` 與 `check_env.bat`，自動從 Arduino IDE 設定抓取路徑，達成零硬編碼配置。
+    *   **Git 管理**: 修正排除規則，將自動產生的 `build_env.bat` 排除於版本控制之外，保護本機開發路徑。
 *   **🌐 GitHub 部署**:
     *   Repo: `https://github.com/pondahai/PicoApple2`
     *   完成 Git 歷史安全清理（移除 ROM 檔）。
