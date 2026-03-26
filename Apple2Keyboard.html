@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>🍎 PicoApple2 Pro Console</title>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.1.0/css/xterm.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.1.0/lib/xterm.min.js"></script>
+    <style>
+        body { background: #1a1a1a; color: #00ff00; font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; display: flex; flex-direction: column; height: 100vh; box-sizing: border-box; }
+        #header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        #status { padding: 8px 15px; background: #000; border: 1px solid #444; border-radius: 5px; font-family: monospace; font-size: 14px; }
+        .btn { background: #444; color: #fff; border: none; padding: 10px 20px; cursor: pointer; border-radius: 5px; font-weight: bold; transition: 0.2s; }
+        .btn:hover { background: #666; }
+        .btn.connected { background: #008800; border: 1px solid #0f0; }
+        
+        #main-layout { display: flex; gap: 20px; flex: 1; min-height: 0; }
+        #terminal-container { flex: 2; background: #000; border-radius: 10px; padding: 10px; border: 2px solid #333; position: relative; }
+        #control-panel { flex: 1; background: #262626; border-radius: 10px; padding: 20px; border: 1px solid #444; display: flex; flex-direction: column; gap: 20px; }
+        
+        .key-group { text-align: left; background: #333; padding: 15px; border-radius: 8px; }
+        .key-group h4 { margin: 0 0 10px 0; color: #fff; border-bottom: 1px solid #555; }
+        kbd { background: #555; color: #fff; padding: 2px 6px; border-radius: 3px; font-family: monospace; font-size: 12px; }
+        .active-key { color: #0f0; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <h2 style="margin:0; color:white;">🍎 PicoApple2 Pro Console</h2>
+        <div id="status">STATUS: DISCONNECTED</div>
+        <button id="connect" class="btn">🔌 CONNECT PICO</button>
+    </div>
+
+    <div id="main-layout">
+        <div id="terminal-container">
+            <div id="terminal" style="height: 100%;"></div>
+        </div>
+
+        <div id="control-panel">
+            <div class="key-group">
+                <h4>🕹️ Joystick & Buttons</h4>
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                    <div><kbd>Arrows</kbd> Move</div>
+                    <div><kbd>PgUp</kbd> Open 🍎</div>
+                    <div><kbd>PgDn</kbd> Closed 🍎</div>
+                </div>
+            </div>
+            <div class="key-group">
+                <h4>⚙️ System Commands</h4>
+                <div style="display:grid; grid-template-columns: 1fr; gap: 5px;">
+                    <div><kbd>F1</kbd> Warm Reset</div>
+                    <div><kbd>F2</kbd> Cold Reset</div>
+                    <div><kbd>F3</kbd> Disk Menu</div>
+                </div>
+            </div>
+            <div style="margin-top:auto; font-size: 14px; color: #888;">
+                Last Key: <span id="key-val" class="active-key">-</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let port, writer, reader;
+        const term = new Terminal({
+            cursorBlink: true,
+            fontSize: 14,
+            theme: { background: '#000000' },
+            convertEol: true
+        });
+        term.open(document.getElementById('terminal'));
+        term.writeln('PicoApple2 Console Ready.');
+
+        const joyMap = { 'ArrowUp': 0, 'ArrowDown': 1, 'ArrowLeft': 2, 'ArrowRight': 3, 'PageUp': 4, 'PageDown': 5 };
+
+        // [自動連線邏輯] 檢查是否已經有授權過的設備
+        async function checkAutoConnect() {
+            const ports = await navigator.serial.getPorts();
+            if (ports.length > 0) {
+                port = ports[0];
+                document.getElementById('connect').innerText = "⚡ RECONNECT";
+                document.getElementById('status').innerText = "STATUS: READY TO RECONNECT";
+            }
+        }
+        checkAutoConnect();
+
+        document.getElementById('connect').onclick = async () => {
+            try {
+                if (!port) {
+                    port = await navigator.serial.requestPort();
+                }
+                await port.open({ baudRate: 115200 });
+                writer = port.writable.getWriter();
+                document.getElementById('status').innerText = "STATUS: CONNECTED";
+                document.getElementById('connect').classList.add('connected');
+                document.getElementById('connect').innerText = "✅ ONLINE";
+                startReading();
+            } catch (e) { term.writeln('\r\n[ERROR] ' + e); }
+        };
+
+        async function startReading() {
+            while (port.readable) {
+                reader = port.readable.getReader();
+                try {
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        term.write(value);
+                    }
+                } catch (e) { break; }
+                finally { reader.releaseLock(); }
+            }
+        }
+
+        async function sendProtocol(type, idx, stat) {
+            if (!writer) return;
+            await writer.write(new Uint8Array([0x02, type.charCodeAt(0), idx, stat]));
+        }
+
+        async function sendRaw(bytes) {
+            if (!writer) return;
+            await writer.write(new Uint8Array(bytes));
+        }
+
+        // 核心邏輯：統一處理按鍵事件
+        async function handleKeyEvent(e, isDown) {
+            if (!writer) return true; // 沒連線就不處理
+
+            // 1. 處理搖桿 (方向鍵、換頁鍵)
+            if (joyMap[e.key] !== undefined) {
+                await sendProtocol('J', joyMap[e.key], isDown ? 1 : 0);
+                return false; // 攔截，不交給終端機
+            }
+
+            if (!isDown) return true; // 鍵盤類只處理 Press
+
+            document.getElementById('key-val').innerText = e.key;
+
+            // 2. 系統功能鍵
+            if (e.key === 'F1') { await sendRaw([0x1B, 0x4F, 0x50]); return false; }
+            if (e.key === 'F2') { await sendRaw([0x1B, 0x4F, 0x51]); return false; }
+            if (e.key === 'F3') { await sendRaw([0x1B, 0x4F, 0x52]); return false; }
+
+            // 3. Apple II ASCII 鍵盤
+            let charCode = 0;
+            if (e.ctrlKey && e.keyCode >= 65 && e.keyCode <= 90) charCode = e.keyCode - 64;
+            else if (e.key === 'Enter') charCode = 0x0D;
+            else if (e.key === 'Escape') charCode = 0x1B;
+            else if (e.key === 'Backspace') charCode = 0x08;
+            else if (e.key === 'Tab') charCode = 0x09;
+            else if (e.key.length === 1) charCode = e.key.toUpperCase().charCodeAt(0);
+
+            if (charCode > 0) {
+                await sendProtocol('K', charCode, 1);
+                return false; // 攔截
+            }
+            return true;
+        }
+
+        // 監聽全局事件 (頁面空白處)
+        window.onkeydown = (e) => { if (e.repeat && !joyMap[e.key]) return; handleKeyEvent(e, true).then(r => { if(!r) e.preventDefault(); }); };
+        window.onkeyup = (e) => { handleKeyEvent(e, false).then(r => { if(!r) e.preventDefault(); }); };
+
+        // [關鍵修復] 攔截終端機內部的按鍵事件
+        term.attachCustomKeyEventHandler(async (e) => {
+            if (e.type === 'keydown') {
+                const shouldPassThrough = await handleKeyEvent(e, true);
+                return shouldPassThrough; // 返回 true 則 xterm 繼續處理，false 則 xterm 忽略
+            } else if (e.type === 'keyup') {
+                const shouldPassThrough = await handleKeyEvent(e, false);
+                return shouldPassThrough;
+            }
+            return true;
+        });
+    </script>
+</body>
+</html>

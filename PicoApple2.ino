@@ -52,6 +52,10 @@ volatile bool g_emu_paused = false;
 
 volatile bool joy_left = false, joy_right = false, joy_up = false, joy_down = false;
 volatile bool joy_btn0 = false, joy_btn1 = false;
+// [新增] 專門給 Serial 使用的狀態，避免與實體掃描衝突
+volatile bool ser_joy_up = false, ser_joy_down = false, ser_joy_left = false, ser_joy_right = false;
+volatile bool ser_joy_btn0 = false, ser_joy_btn1 = false;
+volatile uint32_t joy_auto_release_ms[6] = {0}; // 0:U, 1:D, 2:L, 3:R, 4:B0, 5:B1
 
 void pushKey(uint8_t k) {
   int next = (g_key_head + 1) % KEY_FIFO_SIZE;
@@ -240,7 +244,42 @@ void loop() {
     }
 
     if (esc_state == 0) {
-      if (sK == 0x1B) { esc_state = 1; esc_idx = 0; } // Start of ESC sequence
+      if (sK == 0x1B) { 
+        esc_state = 1; esc_idx = 0; 
+      }
+      else if (sK == 0x02) { // [STX] - Real-time Protocol (Press/Release)
+        uint32_t timeout = micros() + 1000;
+        while (Serial.available() < 3 && micros() < timeout); 
+        if (Serial.available() >= 3) {
+          uint8_t type = Serial.read();
+          uint8_t idx  = Serial.read();
+          uint8_t stat = Serial.read();
+          if (type == 'J') { // Joystick (0:U, 1:D, 2:L, 3:R, 4:B0, 5:B1)
+            bool b = (stat == 1);
+            if (b && g_show_menu) {
+              if (idx == 0) g_menu_cmd = 1;      // Up
+              else if (idx == 1) g_menu_cmd = 2; // Down
+              else if (idx == 4) g_menu_cmd = 3; // Enter (PB0)
+              else if (idx == 5) g_menu_cmd = 4; // Esc (PB1)
+            }
+            if (idx == 0) { ser_joy_up = b; joy_auto_release_ms[0] = 0; }
+            else if (idx == 1) { ser_joy_down = b; joy_auto_release_ms[1] = 0; }
+            else if (idx == 2) { ser_joy_left = b; joy_auto_release_ms[2] = 0; }
+            else if (idx == 3) { ser_joy_right = b; joy_auto_release_ms[3] = 0; }
+            else if (idx == 4) { ser_joy_btn0 = b; joy_auto_release_ms[4] = 0; }
+            else if (idx == 5) { ser_joy_btn1 = b; joy_auto_release_ms[5] = 0; }
+          } else if (type == 'K') { // Keyboard ASCII
+            if (stat == 1) {
+              if (g_show_menu) {
+                if (idx == 0x0D) g_menu_cmd = 3;      // Enter
+                else if (idx == 0x1B) g_menu_cmd = 4; // Esc
+                else if (idx == 'Q' || idx == 'X') g_menu_cmd = 4;
+              }
+              pushKey(idx); 
+            }
+          }
+        }
+      }
       else if (sK == 0x0B) { // Ctrl+K (0x0B) to enter Monitor Mode
         g_monitor_mode = true; g_emu_paused = true;
         Serial.println("\n[Monitor Mode] Started. Press ESC to exit.");
@@ -254,32 +293,37 @@ void loop() {
           if (g_show_menu) g_menu_cmd = 3; // Enter in menu
         }
         else if (sK >= 'a' && sK <= 'z') sK -= 32; 
+
+        if (g_show_menu && (sK == 'Q' || sK == 'X')) g_menu_cmd = 4;
         
         // Control characters (0x01-0x1A for CTRL+A..Z) are kept as is
         pushKey(sK);
       }
     } else if (esc_state == 1) { // Expecting '[' or 'O'
       if (sK == '[' || sK == 'O') { esc_buf[esc_idx++] = sK; esc_state = 2; }
-      else { esc_state = 0; } // Invalid sequence
+      else { 
+        if (g_show_menu) g_menu_cmd = 4; // Standalone ESC exits menu
+        esc_state = 0; 
+      }
     } else if (esc_state == 2) { // Gathering parameters
       if (esc_idx < 7) esc_buf[esc_idx++] = sK;
       // End of sequence detection
       if ((sK >= 'A' && sK <= 'Z') || sK == '~') {
         // Parse results
         if (esc_buf[0] == '[') {
-          if (sK == 'A') { joy_up = true; delay(50); joy_up = false; if (g_show_menu) g_menu_cmd = 1; }    // Arrow Up
-          else if (sK == 'B') { joy_down = true; delay(50); joy_down = false; if (g_show_menu) g_menu_cmd = 2; } // Arrow Down
-          else if (sK == 'C') { joy_right = true; delay(50); joy_right = false; } // Arrow Right
-          else if (sK == 'D') { joy_left = true; delay(50); joy_left = false; } // Arrow Left
+          if (sK == 'A') { if (g_show_menu) g_menu_cmd = 1; else { ser_joy_up = true; joy_auto_release_ms[0] = millis() + 150; } }
+          else if (sK == 'B') { if (g_show_menu) g_menu_cmd = 2; else { ser_joy_down = true; joy_auto_release_ms[1] = millis() + 150; } }
+          else if (sK == 'C') { ser_joy_right = true; joy_auto_release_ms[3] = millis() + 150; }
+          else if (sK == 'D') { ser_joy_left = true; joy_auto_release_ms[2] = millis() + 150; }
           else if (String(esc_buf).indexOf("11~") >= 0) g_f_key_event = 1; // F1
           else if (String(esc_buf).indexOf("12~") >= 0) g_f_key_event = 2; // F2
           else if (String(esc_buf).indexOf("13~") >= 0) g_f_key_event = 3; // F3
           else if (String(esc_buf).indexOf("15~") >= 0) g_f_key_event = 4; // F4
           else if (sK == '~') {
-            if (String(esc_buf).indexOf("5~") >= 0) { joy_btn0 = true; delay(100); joy_btn0 = false; } // PGUP
-            else if (String(esc_buf).indexOf("6~") >= 0) { joy_btn1 = true; delay(100); joy_btn1 = false; } // PGDN
+            if (String(esc_buf).indexOf("5~") >= 0) { ser_joy_btn0 = true; joy_auto_release_ms[4] = millis() + 200; } // PGUP
+            else if (String(esc_buf).indexOf("6~") >= 0) { ser_joy_btn1 = true; joy_auto_release_ms[5] = millis() + 200; } // PGDN
           }
-        } else if (esc_buf[0] == 'O') { // Some terminals send SS3 sequences
+        } else if (esc_buf[0] == 'O') { // SS3 sequences
           if (sK == 'P') g_f_key_event = 1; // F1
           else if (sK == 'Q') g_f_key_event = 2; // F2
           else if (sK == 'R') g_f_key_event = 3; // F3
@@ -290,14 +334,23 @@ void loop() {
     }
   }
   
+  // --- [Joystick Auto-Release Logic for Legacy Terminal] ---
+  uint32_t now_ms = millis();
+  if (joy_auto_release_ms[0] && now_ms > joy_auto_release_ms[0]) { ser_joy_up = false; joy_auto_release_ms[0] = 0; }
+  if (joy_auto_release_ms[1] && now_ms > joy_auto_release_ms[1]) { ser_joy_down = false; joy_auto_release_ms[1] = 0; }
+  if (joy_auto_release_ms[2] && now_ms > joy_auto_release_ms[2]) { ser_joy_left = false; joy_auto_release_ms[2] = 0; }
+  if (joy_auto_release_ms[3] && now_ms > joy_auto_release_ms[3]) { ser_joy_right = false; joy_auto_release_ms[3] = 0; }
+  if (joy_auto_release_ms[4] && now_ms > joy_auto_release_ms[4]) { ser_joy_btn0 = false; joy_auto_release_ms[4] = 0; }
+  if (joy_auto_release_ms[5] && now_ms > joy_auto_release_ms[5]) { ser_joy_btn1 = false; joy_auto_release_ms[5] = 0; }
+  
   if (g_monitor_mode) return; // In monitor mode, skip emulation
   if (g_show_menu) return;    // In menu mode, skip emulation loop
 
   uint32_t irq_joy = spin_lock_blocking(res_lock);
-  apple2_set_paddle(0, joy_left ? 0 : (joy_right ? 255 : 128));
-  apple2_set_paddle(1, joy_up ? 0 : (joy_down ? 255 : 128));
-  apple2_set_button(0, joy_btn0);
-  apple2_set_button(1, joy_btn1);
+  apple2_set_paddle(0, (joy_left || ser_joy_left) ? 0 : ((joy_right || ser_joy_right) ? 255 : 128));
+  apple2_set_paddle(1, (joy_up || ser_joy_up) ? 0 : ((joy_down || ser_joy_down) ? 255 : 128));
+  apple2_set_button(0, joy_btn0 || ser_joy_btn0);
+  apple2_set_button(1, joy_btn1 || ser_joy_btn1);
   spin_unlock(res_lock, irq_joy);
 
   if (peekKey() != 0) {
@@ -531,14 +584,15 @@ void loop1() {
 
   if (g_show_menu) {
     static unsigned long last_m_ms = 0;
-    bool b_up = (digitalRead(BTN_UP) == LOW) || (menu_key == (char)209);
-    bool b_down = (digitalRead(BTN_DOWN) == LOW) || (menu_key == (char)210);
-    bool b_a = (digitalRead(BTN_A) == LOW) || (menu_key == (char)203);
-    bool b_b = (digitalRead(BTN_B) == LOW) || (menu_key == (char)207);
+    bool b_up = (digitalRead(BTN_UP) == LOW) || (menu_key == (char)209) || (g_menu_cmd == 1);
+    bool b_down = (digitalRead(BTN_DOWN) == LOW) || (menu_key == (char)210) || (g_menu_cmd == 2);
+    bool b_a = (digitalRead(BTN_A) == LOW) || (menu_key == (char)203) || (g_menu_cmd == 3);
+    bool b_b = (digitalRead(BTN_B) == LOW) || (menu_key == (char)207) || (g_menu_cmd == 4);
     if (millis() - last_m_ms > 200) {
-      if (b_up) { selected_file_idx = (selected_file_idx - 1 + disk_file_count) % disk_file_count; drawDiskMenu(); last_m_ms = millis(); }
-      else if (b_down) { selected_file_idx = (selected_file_idx + 1) % disk_file_count; drawDiskMenu(); last_m_ms = millis(); }
+      if (b_up) { selected_file_idx = (selected_file_idx - 1 + disk_file_count) % disk_file_count; drawDiskMenu(); last_m_ms = millis(); g_menu_cmd = 0; }
+      else if (b_down) { selected_file_idx = (selected_file_idx + 1) % disk_file_count; drawDiskMenu(); last_m_ms = millis(); g_menu_cmd = 0; }
       else if (b_a) {
+        g_menu_cmd = 0;
         if (disk_file_count > 0) {
           g_emu_paused = true; flushDirtyTrack(); 
           if (diskFile) diskFile.close(); 
@@ -563,7 +617,7 @@ void loop1() {
         }
         g_show_menu = false; g_emu_paused = false; tft.fillScreen(ILI9341_BLACK); last_m_ms = millis();
       }
-      else if (b_b) { g_show_menu = false; g_emu_paused = false; tft.fillScreen(ILI9341_BLACK); last_m_ms = millis(); }
+      else if (b_b) { g_menu_cmd = 0; g_show_menu = false; g_emu_paused = false; tft.fillScreen(ILI9341_BLACK); last_m_ms = millis(); }
     }
     return;
   }

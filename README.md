@@ -112,7 +112,33 @@
 
 ---
 
+## 🖥️ 專業虛擬終端機 (Pro Console)
+
+本專案內建一個基於 **WebSerial** 的高效能虛擬控制台，讓您可以透過電腦鍵盤完美模擬 Apple II 的所有操作。
+
+### 如何啟動
+在專案根目錄下執行 `terminal.bat`，系統將自動以 Chrome/Edge 瀏覽器開啟 `Apple2Keyboard.html`。
+
+### 核心功能
+*   **全鍵盤映射**: 捕捉電腦按鍵並轉換為 Apple II ASCII 碼，支援 **CTRL 組合鍵**、Enter、Backspace 與 Esc。
+*   **即時狀態協定 (STX)**: 不同於傳統終端機，本控制台實作了專屬的按下/放開狀態同步，實現真正的「長按」行為。
+*   **專業級終端顯示**: 內建 `xterm.js` 渲染引擎，同步顯示 Pico 輸出的所有 Log 與 Debug 訊息。
+*   **記憶連線**: 只要連線過一次，下次啟動僅需點擊 `RECONNECT` 即可快速上線。
+
+### 操作對應表
+| 功能 | 電腦鍵盤按鍵 | 說明 |
+| :--- | :--- | :--- |
+| **打字輸入** | `A-Z`, `0-9`, `符號` | 自動轉換為 Apple II ASCII (預設大寫) |
+| **組合鍵** | `CTRL + A-Z` | 傳送標準控制碼 (如 Ctrl-C 中斷) |
+| **搖桿軸** | `方向鍵 (Arrows)` | 精確模擬 Paddle 0/1 的狀態 (支援長按) |
+| **蘋果按鈕** | `Page Up / Down` | 對應 PB0 (Open-Apple) 與 PB1 (Closed-Apple) |
+| **系統重置** | `F1` / `F2` | F1: Warm Reset (Ctrl-Reset), F2: Cold Reset |
+| **磁碟選單** | `F3` | 開啟 SD 卡選單，之後可直接用方向鍵導航 |
+
+---
+
 ## 📂 專案結構 (Project Structure)
+
 
 *   `PicoApple2.ino`: 主程式進入點（原 `pico_apple2_emulator.ino`）。
 *   `apple2_core/`: Rust 撰寫的 Apple II 模擬器核心。

@@ -1,4 +1,5 @@
 @echo off
-:: 直接啟動 PowerShell 高速監聽器
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0serial_monitor.ps1"
-pause
+set "HTML_PATH=%~dp0Apple2Keyboard.html"
+echo Opening PicoApple2 Pro Console...
+start "" "%HTML_PATH%"
+exit
