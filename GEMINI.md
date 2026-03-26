@@ -11,7 +11,7 @@ The project is split into two main layers:
     *   **Responsibility:** Implements the 6502 CPU, memory mapping, Disk II controller logic, and peripheral state.
     *   **Key Feature:** "Zero-buffer JIT Rendering" — instead of maintaining a full framebuffer, the core provides direct access to Apple II RAM, which the frontend renders on-the-fly.
 
-2.  **Frontend & Hardware I/O (`pico_apple2_emulator.ino`):**
+2.  **Frontend & Hardware I/O (`PicoApple2.ino`):**
     *   **Language:** C++ (Arduino framework with Pico SDK).
     *   **Responsibility:** Handles dual-core scheduling, ILI9341 display driver (SPI), SD card filesystem (FatFS/SD.h), keyboard matrix scanning, and 1-bit speaker output.
     *   **Core Distribution:**
@@ -28,30 +28,37 @@ The project is split into two main layers:
 
 ### Build Workflow
 
-1.  **Compile Rust Core:**
+1.  **Environment Setup:**
+    The project uses a dynamic environment scanner. Run any build script to trigger:
+    ```bash
+    .\scripts\scan_env.ps1  # Automatically detects Arduino-CLI, Pico SDK, and Lib paths
+    ```
+
+2.  **Compile Rust Core:**
     ```bash
     cd apple2_core
     cargo build --target thumbv6m-none-eabi --release
     ```
-2.  **Sync Static Library:**
-    Copy `apple2_core/target/thumbv6m-none-eabi/release/libapple2_core.a` to the project's `src/` directory.
-3.  **Compile Arduino Sketch:**
-    Use `arduino-cli` with explicit linker flags to link the Rust static library:
+3.  **Sync Static Library:**
+    The library `libapple2_core.a` must be copied to the `src/` directory for direct linking.
+
+4.  **Compile Arduino Sketch:**
+    Use `arduino-cli` with explicit linker flags (automated by `full_build.bat`):
     ```bash
     .\arduino-cli.exe compile --fqbn rp2040:rp2040:rpipico ^
-      --build-property "compiler.c.elf.extra_flags=\"-LC:\Users\Dell\Documents\pico_apple2_emulator\src\" -lapple2_core" ^
-      pico_apple2_emulator.ino
+      --build-property "compiler.c.elf.extra_flags=\"-L<PROJECT_ROOT>\src\" -lapple2_core" ^
+      PicoApple2.ino
     ```
-    *Note: Replace the `-L` path with your absolute project `src` path if it differs.*
 
 ### Build Scripts
-*   **`full_build.bat`:** The primary build script. It automates Rust compilation, library syncing, Arduino compilation, and flashing.
-*   **`build_rust.bat`:** Compiles only the Rust core and syncs the library/headers to the Arduino environment.
+*   **`full_build.bat`:** **Recommended.** Automates environment scan, Rust compilation, library syncing, Arduino compilation, and flashing via `picotool`.
+*   **`build_rust.bat`:** Compiles only the Rust core and syncs the library/headers to the Arduino `libraries/` directory for IDE use.
+*   **`check_env.bat`:** Validates the development environment and paths.
 
 ### Deployment
-1.  Connect the Pico in Bootloader mode (or via Serial if already running).
+1.  Connect the Pico in Bootloader mode.
 2.  Run `full_build.bat`.
-3.  The script will automatically detect the COM port and flash the firmware.
+3.  The script will automatically detect the device and flash the firmware.
 
 ## 🎹 Interaction & Controls
 
@@ -66,11 +73,12 @@ The project is split into two main layers:
 ## 📁 Key Files & Directories
 
 *   `apple2_core/`: Rust source code for the emulator logic.
-*   `pico_apple2_emulator.ino`: Main Arduino sketch and hardware setup.
+*   `PicoApple2.ino`: Main Arduino sketch and hardware setup.
 *   `Apple2Core.h`: The C bridge defining the FFI interface between Rust and C++.
-*   `drivers/`: Custom C++ hardware drivers.
 *   `src/`: Local storage for the compiled `libapple2_core.a`.
-*   `DevLog.md`: Detailed technical history and "Lessons Learned" regarding disk timing and color calibration.
+*   `scripts/`: PowerShell utility scripts for environment detection and scanning.
+*   `sd_test/`: Diagnostic tools for SD card performance and compatibility.
+*   `DevLog.md`: Detailed technical history and "Lessons Learned".
 *   `PROJECT_MAP.md`: High-level roadmap and status of features.
 
 ## ⚠️ Development Conventions
