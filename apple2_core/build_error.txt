@@ -1,0 +1,73 @@
+﻿cargo :    Compiling proc-macro2 v1.0.106
+位於 線路:1 字元:17
++ cd apple2_core; cargo check --target thumbv6m-none-eabi 2>&1 | Out-Fi ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling proc-macro2 v1.0.106:String) [], RemoteExcepti 
+   on
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling syn v1.0.109
+   Compiling rustversion v1.0.22
+   Compiling unicode-width v0.1.14
+   Compiling base64 v0.13.1
+    Checking const-default v1.0.0
+    Checking cfg-if v1.0.4
+    Checking linked_list_allocator v0.10.5
+    Checking critical-section v1.2.0
+   Compiling svgbobdoc v0.3.0
+    Checking rlsf v0.2.2
+    Checking embedded-alloc v0.6.0
+    Checking apple2-core v0.1.0 (C:\Users\pondahai\Documents\GitHub\PicoApple2\apple2_core)
+warning: unnecessary parentheses around block return value
+   --> src\nibble.rs:113:13
+    |
+113 |             ((b1 << shift) | (b2 >> (8 - shift)))
+    |             ^                                   ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+113 -             ((b1 << shift) | (b2 >> (8 - shift)))
+113 +             (b1 << shift) | (b2 >> (8 - shift)) 
+    |
+
+error[E0609]: no field `rom` on type `Box<Disk2>`
+   --> src\memory.rs:295:51
+    |
+295 |                     0xC600..=0xC6FF => self.disk2.rom[(addr - 0xC600) as usize],
+    |                                                   ^^^ unknown field
+    |
+    = note: available fields are: `motor_on`, `drive_select`, `q6`, `q7`, `current_track` ... and 14 othe
+rs
+
+error[E0609]: no field `rom` on type `Box<Disk2>`
+  --> src\lib.rs:45:25
+   |
+45 |             m.mem.disk2.rom.copy_from_slice(DISK2_ROM);
+   |                         ^^^ unknown field
+   |
+   = note: available fields are: `motor_on`, `drive_select`, `q6`, `q7`, `current_track` ... and 14 other
+s
+
+warning: unused variable: `cycle`
+   --> src\memory.rs:167:34
+    |
+167 |     fn toggle_speaker(&mut self, cycle: Option<u64>) {
+    |                                  ^^^^^ help: if this is intentional, prefix it with an underscore: 
+`_cycle`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `target_track`
+  --> src\nibble.rs:89:49
+   |
+89 | pub fn denibblize_track(track_data: &TrackData, target_track: u8, out_buffer: &mut [u8; 4096]) -> u8
+ {
+   |                                                 ^^^^^^^^^^^^ help: if this is intentional, prefix it
+ with an underscore: `_target_track`
+
+For more information about this error, try `rustc --explain E0609`.
+warning: `apple2-core` (lib) generated 3 warnings
+error: could not compile `apple2-core` (lib) due to 2 previous errors; 3 warnings emitted

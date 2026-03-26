@@ -18,17 +18,32 @@ pub struct Disk2 {
     pub byte_index: usize,
     pub cycles_accumulator: u32,
     pub data_latch: u8,
-    pub read_shift_register: u8,
-    pub read_bit_phase: u8,
-    pub write_ready: bool,
-    pub write_bit_phase: u8,
     pub is_dirty: bool,
 }
+
+const DISK2_ROM: [u8; 256] = [
+    0x18, 0xD8, 0x18, 0x08, 0x0A, 0x0A, 0x0A, 0x0A, 0x18, 0x39, 0x18, 0x39, 0x18, 0x3B, 0x18, 0x3B,
+    0x18, 0x38, 0x18, 0x28, 0x0A, 0x0A, 0x0A, 0x0A, 0x18, 0x39, 0x18, 0x39, 0x18, 0x3B, 0x18, 0x3B,
+    0x2D, 0xD8, 0x38, 0x48, 0x0A, 0x0A, 0x0A, 0x0A, 0x28, 0x48, 0x28, 0x48, 0x28, 0x48, 0x28, 0x48,
+    0x2D, 0x48, 0x38, 0x48, 0x0A, 0x0A, 0x0A, 0x0A, 0x28, 0x48, 0x28, 0x48, 0x28, 0x48, 0x28, 0x48,
+    0xD8, 0xD8, 0xD8, 0xD8, 0x0A, 0x0A, 0x0A, 0x0A, 0x58, 0x78, 0x58, 0x78, 0x58, 0x78, 0x58, 0x78,
+    0x58, 0x78, 0x58, 0x78, 0x0A, 0x0A, 0x0A, 0x0A, 0x58, 0x78, 0x58, 0x78, 0x58, 0x78, 0x58, 0x78,
+    0xD8, 0xD8, 0xD8, 0xD8, 0x0A, 0x0A, 0x0A, 0x0A, 0x68, 0x08, 0x68, 0x88, 0x68, 0x08, 0x68, 0x88,
+    0x68, 0x88, 0x68, 0x88, 0x0A, 0x0A, 0x0A, 0x0A, 0x68, 0x08, 0x68, 0x88, 0x68, 0x08, 0x68, 0x88,
+    0xD8, 0xCD, 0xD8, 0xD8, 0x0A, 0x0A, 0x0A, 0x0A, 0x98, 0xB9, 0x98, 0xB9, 0x98, 0xBB, 0x98, 0xBB,
+    0x98, 0xBD, 0x98, 0xB8, 0x0A, 0x0A, 0x0A, 0x0A, 0x98, 0xB9, 0x98, 0xB9, 0x98, 0xBB, 0x98, 0xBB,
+    0xD8, 0xD9, 0xD8, 0xD8, 0x0A, 0x0A, 0x0A, 0x0A, 0xA8, 0xC8, 0xA8, 0xC8, 0xA8, 0xC8, 0xA8, 0xC8,
+    0x29, 0x59, 0xA8, 0xC8, 0x0A, 0x0A, 0x0A, 0x0A, 0xA8, 0xC8, 0xA8, 0xC8, 0xA8, 0xC8, 0xA8, 0xC8,
+    0xD9, 0xFD, 0xD8, 0xF8, 0x0A, 0x0A, 0x0A, 0x0A, 0xD8, 0xF8, 0xD8, 0xF8, 0xD8, 0xF8, 0xD8, 0xF8,
+    0xD9, 0xFD, 0xA0, 0xF8, 0x0A, 0x0A, 0x0A, 0x0A, 0xD8, 0xF8, 0xD8, 0xF8, 0xD8, 0xF8, 0xD8, 0xF8,
+    0xD8, 0xDD, 0xE8, 0xE0, 0x0A, 0x0A, 0x0A, 0x0A, 0xE8, 0x88, 0xE8, 0x08, 0xE8, 0x88, 0xE8, 0x08,
+    0x08, 0x4D, 0xE8, 0xE0, 0x0A, 0x0A, 0x0A, 0x0A, 0xE8, 0x88, 0xE8, 0x08, 0xE8, 0x88, 0xE8, 0x08,
+];
 
 impl Disk2 {
     pub fn new() -> Self {
         Self {
-            rom: [0; 256],
+            rom: DISK2_ROM,
             motor_on: false,
             drive_select: 1,
             q6: false,
@@ -43,10 +58,6 @@ impl Disk2 {
             byte_index: 0,
             cycles_accumulator: 0,
             data_latch: 0,
-            read_shift_register: 0,
-            read_bit_phase: 0,
-            write_ready: false,
-            write_bit_phase: 0,
             is_dirty: false,
         }
     }
@@ -61,23 +72,10 @@ impl Disk2 {
         self.handle_io(addr);
         let switch = addr & 0x0F;
         if self.motor_on && switch == 0x0C {
-            if !self.is_disk_loaded { return 0x7F; } // 浮空狀態
-
-            // Q7 ON, Q6 OFF 模式 (由 handle_io 設定)：這是 Write Protect Sense
-            if self.q7 && !self.q6 {
-                return 0x00; // 0x00 代表「未寫入保護」，0x80 代表「有保護」
-            }
-
-            // Q7 ON, Q6 ON 模式：寫入準備檢查
-            if self.q6 && self.q7 {
-                let ready = self.write_ready;
-                self.write_ready = false;
-                return if ready { 0x80 } else { 0x00 };
-            }
-
-            // 正常的讀取模式 (Q7 OFF)
+            if !self.is_disk_loaded { return 0x7F; } 
+            if self.q7 { return 0x00; } // 寫入模式下返回狀態位
             let val = self.data_latch;
-            self.data_latch &= 0x7F;
+            if !self.q6 { self.data_latch &= 0x7F; }
             return val;
         }
         0x00
@@ -86,14 +84,26 @@ impl Disk2 {
     pub fn write_io(&mut self, addr: u16, data: u8) {
         self.handle_io(addr);
         let switch = addr & 0x0F;
-        // 只要碰觸寫入暫存器，不論模式，先更新 Latch
         if switch == 0x0D {
             self.data_latch = data;
-            self.write_bit_phase = 0;
-            self.write_ready = false;
-            // 如果寫入門 (q7) 開啟，則標記為髒資料
             if self.q7 {
+                // --- 核心修正：寫入即步進 ---
+                // 當軟體寫入一個位元組，我們立即將其填入磁軌，並手動推進磁頭指標
+                // 這能保證寫入的資料絕對不會重疊，解決 15 扇區變 14 扇區的問題
+                self.current_track_data.raw_bytes[self.byte_index] = data;
+                self.current_track_data.dirty_mask[self.byte_index] = true;
                 self.is_dirty = true;
+                
+                let track_len = self.current_track_data.length;
+                if track_len > 0 {
+                    self.byte_index = (self.byte_index + 1) % track_len;
+                    // 補償 cycles_accumulator，防止 tick 再次步進
+                    if self.cycles_accumulator >= 32 {
+                        self.cycles_accumulator -= 32;
+                    } else {
+                        self.cycles_accumulator = 0;
+                    }
+                }
             }
         }
     }
@@ -158,57 +168,30 @@ impl Disk2 {
     pub fn tick(&mut self, cycles: u32) {
         if self.motor_on && self.is_disk_loaded {
             self.cycles_accumulator += cycles;
-            if self.current_track_data.length == 0 { return; }
+            let track_len = self.current_track_data.length;
+            if track_len == 0 { return; }
 
-            while self.cycles_accumulator >= 4 {
-                self.cycles_accumulator -= 4;
-                
-                let mut byte_finished = false;
+            // 每 32 週期移動一個位元組
+            while self.cycles_accumulator >= 32 {
+                self.cycles_accumulator -= 32;
 
-                if self.q7 {
-                    // --- 寫入模式 (Write Mode) ---
-                    // 只要 Q7 為 ON，磁頭就在輸出信號。
-                    // 雖然真實硬體在 Q6 ON 時是載入 (Load)，Q6 OFF 時是移位 (Shift)，
-                    // 但在位元級模擬中，我們簡化為：只要在寫入模式，就持續將 Latch 內容輸出至磁軌。
-                    self.write_bit_phase += 1;
-                    if self.write_bit_phase >= 8 {
-                        self.write_bit_phase = 0;
-                        let val = self.data_latch;
-                        self.is_dirty = true; 
-                        self.current_track_data.raw_bytes[self.byte_index] = val;
-                        self.current_track_data.dirty_mask[self.byte_index] = true; // 真正標記軟體寫入
-                        self.write_ready = true;
-                        byte_finished = true;
-                    }
-                } else {
-                    // --- 讀取或閒置模式 (Read / Idle Mode) ---
-                    let bit = (self.current_track_data.raw_bytes[self.byte_index] >> (7 - self.read_bit_phase)) & 1;
-                    self.read_shift_register = (self.read_shift_register << 1) | bit;
-                    self.read_bit_phase += 1;
-                    
-                    if self.read_bit_phase >= 8 {
-                        self.read_bit_phase = 0;
-                        let published_byte = self.read_shift_register;
-                        // 只有在純讀取模式 (!q6 && !q7) 下才更新 Latch
-                        if !self.q6 && !self.q7 && (published_byte & 0x80) != 0 {
-                            self.data_latch = published_byte;
-                        }
-                        byte_finished = true;
+                // 只有在非寫入模式下，才從磁軌更新 Latch
+                if !self.q7 {
+                    let val = self.current_track_data.raw_bytes[self.byte_index];
+                    if (val & 0x80) != 0 {
+                        self.data_latch = val;
                     }
                 }
 
-                if byte_finished {
-                    self.byte_index = (self.byte_index + 1) % self.current_track_data.length;
-                }
+                // 物理旋轉
+                self.byte_index = (self.byte_index + 1) % track_len;
             }
         }
     }
 
     fn reset_rotation_state(&mut self) {
         self.byte_index = 0;
-        self.read_shift_register = 0;
-        self.read_bit_phase = 0;
-        self.write_bit_phase = 0;
+        self.cycles_accumulator = 0;
     }
 
     pub fn reset(&mut self) {
@@ -219,5 +202,6 @@ impl Disk2 {
         self.is_dirty = false;
         self.q6 = false;
         self.q7 = false;
+        self.reset_rotation_state();
     }
 }
