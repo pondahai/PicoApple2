@@ -85,6 +85,25 @@ const char keymap_shifted[8][8] = {
   { 'X', 'F', 'H', 'K', ':', 203, 212, 214 }, { 'S', 'V', 'N', '<', 213, ' ', 211, 0 }
 };
 
+extern "C" void apple2_init();
+extern "C" uint32_t apple2_tick();
+extern "C" const uint8_t* apple2_get_ram_ptr();
+extern "C" const uint8_t* apple2_get_char_rom_ptr();
+extern "C" const uint8_t* apple2_get_disk_rom_ptr();
+extern "C" uint8_t apple2_get_video_mode();
+extern "C" bool apple2_is_ready_for_key();
+extern "C" void apple2_handle_key(uint8_t ascii);
+extern "C" void apple2_set_paddle(uint8_t index, uint8_t value);
+extern "C" void apple2_set_button(uint8_t index, bool pressed);
+extern "C" bool apple2_get_disk_motor_status();
+extern "C" uint32_t apple2_get_disk_byte_index();
+extern "C" bool apple2_is_track_dirty();
+extern "C" uint8_t apple2_get_denibblized_track(uint8_t* out_buffer);
+extern "C" int32_t apple2_needs_disk_reload();
+extern "C" void apple2_load_track(uint8_t track, const uint8_t* data, uint32_t size);
+extern "C" void apple2_reset();
+extern "C" void apple2_warm_reset();
+
 extern "C" void arduino_toggle_speaker() {
   static bool s = false; s = !s; gpio_put(PIN_JACK_SND, s);
 }
@@ -210,6 +229,21 @@ void setup() {
   pinMode(PIN_JACK_SND, OUTPUT);
   uint32_t irq = spin_lock_blocking(res_lock);
   apple2_init();
+
+  // --- [DEBUG: Verify Slot 6 ROM] ---
+  const uint8_t* disk_rom = apple2_get_disk_rom_ptr();
+  Serial.print("DEBUG: Slot 6 ROM Signature (at $C600): ");
+  if (disk_rom) {
+    for (int i = 0; i < 16; i++) {
+      if (disk_rom[i] < 0x10) Serial.print("0");
+      Serial.print(disk_rom[i], HEX);
+      Serial.print(" ");
+    }
+    Serial.println();
+  } else {
+    Serial.println("FAILED TO GET DISK ROM POINTER!");
+  }
+
   spin_unlock(res_lock, irq);
 }
 
@@ -362,8 +396,15 @@ void loop() {
   if (m_cnt++ > 10) {
     uint32_t irq_m = spin_lock_blocking(res_lock);
     motor_on = apple2_get_disk_motor_status();
+    uint32_t b_idx = apple2_get_disk_byte_index();
     spin_unlock(res_lock, irq_m);
     m_cnt = 0;
+
+    static uint32_t last_disk_debug = 0;
+    if (motor_on && (millis() - last_disk_debug > 1000)) {
+        Serial.print("DISK: Motor ON, Byte Index: "); Serial.println(b_idx);
+        last_disk_debug = millis();
+    }
   }
 
   unsigned long start_t = micros();

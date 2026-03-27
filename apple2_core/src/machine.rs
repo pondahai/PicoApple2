@@ -16,14 +16,9 @@ impl Apple2Machine {
         }
     }
 
-    pub fn load_rom(&mut self, rom_data: &[u8]) {
-        self.mem.load_rom(rom_data);
-    }
-
     pub fn reset(&mut self) {
         self.cpu.reset(&mut self.mem);
         self.total_cycles = 0;
-        self.mem.speaker_toggle_cycles.clear();
     }
 
     pub fn step(&mut self) -> u32 {
@@ -33,10 +28,6 @@ impl Apple2Machine {
         self.mem.end_cpu_step();
         self.total_cycles = self.total_cycles.wrapping_add(cycles as u64);
         cycles
-    }
-
-    pub fn tick_disk(&mut self, cycles: u32) {
-        self.mem.disk2.tick(cycles);
     }
 
     pub fn power_on(&mut self) {
