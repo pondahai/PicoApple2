@@ -19,6 +19,9 @@ pub struct Disk2 {
     pub cycles_accumulator: u32,
     pub data_latch: u8,
     pub is_dirty: bool,
+
+    // --- 時序修正：新資料追蹤 ---
+    pub data_updated: bool,
 }
 
 const DISK2_ROM: [u8; 256] = [
@@ -59,6 +62,7 @@ impl Disk2 {
             cycles_accumulator: 0,
             data_latch: 0,
             is_dirty: false,
+            data_updated: false,
         }
     }
 
@@ -73,9 +77,10 @@ impl Disk2 {
         let switch = addr & 0x0F;
         if self.motor_on && switch == 0x0C {
             if !self.is_disk_loaded { return 0x7F; } 
-            if self.q7 { return 0x00; } // 寫入模式下返回狀態位
             let val = self.data_latch;
-            if !self.q6 { self.data_latch &= 0x7F; }
+            if !self.q6 { 
+                self.data_latch &= 0x7F; 
+            }
             return val;
         }
         0x00
@@ -86,25 +91,7 @@ impl Disk2 {
         let switch = addr & 0x0F;
         if switch == 0x0D {
             self.data_latch = data;
-            if self.q7 {
-                // --- 核心修正：寫入即步進 ---
-                // 當軟體寫入一個位元組，我們立即將其填入磁軌，並手動推進磁頭指標
-                // 這能保證寫入的資料絕對不會重疊，解決 15 扇區變 14 扇區的問題
-                self.current_track_data.raw_bytes[self.byte_index] = data;
-                self.current_track_data.dirty_mask[self.byte_index] = true;
-                self.is_dirty = true;
-                
-                let track_len = self.current_track_data.length;
-                if track_len > 0 {
-                    self.byte_index = (self.byte_index + 1) % track_len;
-                    // 補償 cycles_accumulator，防止 tick 再次步進
-                    if self.cycles_accumulator >= 32 {
-                        self.cycles_accumulator -= 32;
-                    } else {
-                        self.cycles_accumulator = 0;
-                    }
-                }
-            }
+            self.data_updated = true;
         }
     }
 
@@ -171,19 +158,20 @@ impl Disk2 {
             let track_len = self.current_track_data.length;
             if track_len == 0 { return; }
 
-            // 每 32 週期移動一個位元組
             while self.cycles_accumulator >= 32 {
                 self.cycles_accumulator -= 32;
 
-                // 只有在非寫入模式下，才從磁軌更新 Latch
-                if !self.q7 {
-                    let val = self.current_track_data.raw_bytes[self.byte_index];
-                    if (val & 0x80) != 0 {
-                        self.data_latch = val;
-                    }
+                if self.q7 {
+                    // 寫入模式：刻入磁軌
+                    self.current_track_data.raw_bytes[self.byte_index] = self.data_latch;
+                    self.current_track_data.dirty_mask[self.byte_index] = true;
+                    self.is_dirty = true;
+                    self.data_updated = false;
+                } else {
+                    // 讀取模式
+                    self.data_latch = self.current_track_data.raw_bytes[self.byte_index];
                 }
 
-                // 物理旋轉
                 self.byte_index = (self.byte_index + 1) % track_len;
             }
         }

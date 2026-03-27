@@ -115,25 +115,24 @@ void flushDirtyTrack() {
   
   uint32_t irq = spin_lock_blocking(res_lock);
   if (apple2_is_track_dirty()) {
-    // 關鍵修正：存檔時使用「這份資料所屬」的磁軌號碼
     uint8_t target_track = last_loaded_track; 
-    Serial.print("SD: Detected DIRTY track "); Serial.print(target_track); Serial.println(". Preparing to save...");
+    uint32_t offset = (uint32_t)target_track * 4096;
+    
+    // --- [核心修正：Read-Modify-Write] ---
+    // 在解碼前，先讀取 SD 卡上該磁軌的原始資料
+    // 這樣解碼器沒認出來的扇區，就會保留 SD 卡原本正確的內容，不會被垃圾覆蓋
+    if (diskFile.seek(offset)) {
+      diskFile.read(track_buffer, 4096);
+    }
+
+    Serial.print("SD: Syncing DIRTY track "); Serial.print(target_track); Serial.println("...");
     uint8_t valid_count = apple2_get_denibblized_track(track_buffer);
     spin_unlock(res_lock, irq);
     
     if (valid_count >= 1) {
-      uint32_t offset = (uint32_t)target_track * 4096;
       Serial.print("SD: Writing Track "); Serial.print(target_track); 
-      Serial.print(" (Decoded "); Serial.print(valid_count); Serial.println(" sectors)");
+      Serial.print(" (Updated "); Serial.print(valid_count); Serial.println(" sectors)");
       
-      // --- [加入 Hex Dump 偵錯] ---
-      Serial.print("SD: Buffer Data Header: ");
-      for (int i = 0; i < 16; i++) {
-        if (track_buffer[i] < 0x10) Serial.print("0");
-        Serial.print(track_buffer[i], HEX); Serial.print(" ");
-      }
-      Serial.println();
-
       if (diskFile.seek(offset)) {
         size_t written = diskFile.write(track_buffer, 4096);
         diskFile.flush();

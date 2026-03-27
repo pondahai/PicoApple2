@@ -63,6 +63,8 @@ pub extern "C" fn apple2_tick() -> u32 {
     unsafe {
         let mut total_cycles = 0;
         if let Some(ref mut m) = *addr_of_mut!(MACHINE) {
+            // m.step() 內部已經會精確同步磁碟 Tick (透過 finalize_cpu_step_cycles)
+            // 這裡只需要單純執行指令即可
             for _ in 0..1000 { 
                 total_cycles += m.step(); 
             }
@@ -172,15 +174,15 @@ pub extern "C" fn apple2_get_denibblized_track(out_buffer: *mut u8) -> u8 {
     unsafe {
         if let Some(ref mut m) = *addr_of_mut!(MACHINE) {
             let buf = &mut *(out_buffer as *mut [u8; 4096]);
-            // 使用實際載入的磁軌號碼進行校驗，避免磁頭移走導致的 ID 錯位
+            // 解碼目前的磁軌資料
             let sector_count = nibble::denibblize_track(&m.mem.disk2.current_track_data, m.mem.disk2.loaded_track_num, buf);
 
             if sector_count > 0 {
-                // 只要有解碼出任何扇區，我們就進行磁軌重整並清除髒標記
-                // 這樣可以避免因為解碼器太嚴苛導致的寫入死鎖
-                let new_track_data = nibble::nibblize_single_track(m.mem.disk2.loaded_track_num as usize, buf);
-                m.mem.disk2.load_track_data(m.mem.disk2.loaded_track_num, new_track_data);
+                // 修正：不再呼叫 nibblize_single_track 覆寫原始磁軌。
+                // 這樣即使解碼器漏掉一個扇區，原始磁軌上的資料仍被保留，不會永久消失。
                 m.mem.disk2.is_dirty = false;
+                // 手動清除 dirty_mask，因為已經寫回 SD 了
+                m.mem.disk2.current_track_data.dirty_mask.fill(false);
             }
             return sector_count;
         }
