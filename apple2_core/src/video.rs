@@ -60,7 +60,7 @@ impl Video {
 
     /// Render the Apple II Text Mode frame into the 32-bit framebuffer.
     /// Needs a character ROM font to actually draw the letters.
-    pub fn render_text_frame(&mut self, mem: &Apple2Memory, char_rom: &[u8; 2048]) {
+    pub fn render_text_frame(&mut self, _mem: &Apple2Memory, char_rom: &[u8; 2048]) {
         let white_color = 0x00_FF_FF_FF; // ARGB White
         let black_color = 0x00_00_00_00; // ARGB Black
 
@@ -71,7 +71,7 @@ impl Video {
 
             for col in 0..40 {
                 // Read the character code from Video RAM
-                let char_code = mem.ram[(row_addr + col as u16) as usize];
+                let char_code = unsafe { crate::RAM_48K[(row_addr + col as u16) as usize] };
 
                 // Text Modes:
                 // $00-$3F: Inverse (uppercase only)
@@ -153,7 +153,7 @@ impl Video {
             if mem.mixed_mode && row >= 20 {
                 // Render as text
                 for col in 0..40 {
-                    let char_code = mem.ram[(row_addr + col as u16) as usize];
+                    let char_code = unsafe { crate::RAM_48K[(row_addr + col as u16) as usize] };
                     let is_inverse = char_code < 0x40;
                     let is_flashing = char_code >= 0x40 && char_code < 0x80;
                     let invert_colors = is_inverse || (is_flashing && is_blink_on);
@@ -185,7 +185,7 @@ impl Video {
             // Render as Lo-Res Graphics
             for col in 0..40 {
                 // Read the Lo-Res color byte
-                let color_byte = mem.ram[(row_addr + col as u16) as usize];
+                let color_byte = unsafe { crate::RAM_48K[(row_addr + col as u16) as usize] };
 
                 // Top block is the lower 4 bits (pixels 0-3 of the character cell)
                 let top_color = Self::get_lores_color(color_byte & 0x0F);
@@ -243,7 +243,7 @@ impl Video {
                 let row_addr = Self::get_text_row_addr(text_row);
 
                 for col in 0..40 {
-                    let char_code = mem.ram[(row_addr + col as u16) as usize];
+                    let char_code = unsafe { crate::RAM_48K[(row_addr + col as u16) as usize] };
                     let is_inverse = char_code < 0x40;
                     let is_flashing = char_code >= 0x40 && char_code < 0x80;
                     let invert_colors = is_inverse || (is_flashing && is_blink_on);
@@ -275,7 +275,7 @@ impl Video {
             let mut prev_bit = false;
 
             for col in 0..40 {
-                let byte = mem.ram[(row_addr + col as u16) as usize];
+                let byte = unsafe { crate::RAM_48K[(row_addr + col as u16) as usize] };
 
                 // Bit 7 is the palette shift/artifact bit
                 let shift_bit = (byte & 0x80) != 0;
@@ -286,7 +286,7 @@ impl Video {
                     let next_bit = if bit_idx < 6 {
                         (byte & (1 << (bit_idx + 1))) != 0
                     } else if col < 39 {
-                        (mem.ram[(row_addr + col as u16 + 1) as usize] & 0x01) != 0
+                        (unsafe { crate::RAM_48K[(row_addr + col as u16 + 1) as usize] } & 0x01) != 0
                     } else {
                         false
                     };
