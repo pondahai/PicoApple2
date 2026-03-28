@@ -50,6 +50,7 @@ volatile int g_key_head = 0;
 volatile int g_key_tail = 0;
 volatile uint8_t g_f_key_event = 0;
 volatile bool g_emu_paused = false;
+volatile bool g_boot_ready = false; // 新增：開機同步旗標
 
 volatile bool joy_left = false, joy_right = false, joy_up = false, joy_down = false;
 volatile bool joy_btn0 = false, joy_btn1 = false;
@@ -127,28 +128,28 @@ void flushDirtyTrack() {
     uint8_t target_track = last_loaded_track; uint32_t offset = (uint32_t)target_track * 4096;
     if (diskFile.seek(offset)) { diskFile.read(track_buffer, 4096); }
     uint8_t valid_count = apple2_get_denibblized_track(track_buffer);
-    spin_unlock(res_lock, irq);
     if (valid_count >= 1) {
       if (diskFile.seek(offset)) {
         diskFile.write(track_buffer, 4096); diskFile.flush(); diskFile.close();
         diskFile = SD.open(g_current_disk_path, "r+");
       }
     }
-  } else { spin_unlock(res_lock, irq); }
+  }
+  spin_unlock(res_lock, irq);
 }
 
 void loadSingleTrack(uint8_t track) {
   if (!diskFile) return;
   g_emu_paused = true; flushDirtyTrack(); 
   uint32_t offset = (uint32_t)track * 4096;
+  uint32_t irq = spin_lock_blocking(res_lock);
   if (diskFile.seek(offset)) {
     if (diskFile.read(track_buffer, 4096) == 4096) {
-      uint32_t irq = spin_lock_blocking(res_lock);
       apple2_load_track(track, track_buffer, 4096);
       last_loaded_track = track;
-      spin_unlock(res_lock, irq);
     }
   }
+  spin_unlock(res_lock, irq);
   g_emu_paused = false; 
 }
 
@@ -160,13 +161,21 @@ uint16_t get_hires_row_addr(uint8_t row, bool page2) {
 
 void scanDiskFiles() {
   disk_file_count = 0; File root = SD.open("/");
+  if (!root) { Serial.println("SD ERROR: Cannot open root directory"); return; }
+  Serial.println("SD: Scanning for .DSK files...");
   while (true) {
     File entry = root.openNextFile(); if (!entry) break;
     String name = String(entry.name());
-    if (!entry.isDirectory() && (name.endsWith(".DSK") || name.endsWith(".dsk"))) { if (disk_file_count < 20) { disk_files[disk_file_count++] = name; } }
+    if (!entry.isDirectory() && (name.endsWith(".DSK") || name.endsWith(".dsk"))) { 
+      if (disk_file_count < 20) { 
+        disk_files[disk_file_count++] = name; 
+        Serial.print("Found: "); Serial.println(name);
+      } 
+    }
     entry.close();
   }
   root.close();
+  Serial.print("SD: Scan complete. Total DSK files: "); Serial.println(disk_file_count);
 }
 
 void setup() {
@@ -181,7 +190,8 @@ void setup() {
 }
 void loop() {
   static int esc_state = 0; static char esc_buf[8]; static int esc_idx = 0;
-  if (g_emu_paused && !g_show_menu) { return; }
+
+  // 優先處理 Serial 輸入，確保 USB Stack 不會因為 Core 1 阻塞而死鎖
   while (Serial.available() > 0) {
     uint8_t sK = Serial.read();
     if (esc_state == 0) {
@@ -196,7 +206,10 @@ void loop() {
               if (idx == 0) ser_joy_up = b; else if (idx == 1) ser_joy_down = b; else if (idx == 2) ser_joy_left = b; else if (idx == 3) ser_joy_right = b; else if (idx == 4) ser_joy_btn0 = b; else if (idx == 5) ser_joy_btn1 = b;
             } else if (type == 'K' && stat == 1) {
               if (g_show_menu) { if (idx == 0x0D) g_menu_cmd = 3; else if (idx == 0x1B) g_menu_cmd = 4; }
-              pushKey(idx); 
+              if (idx == 112) g_f_key_event = 1; 
+              else if (idx == 113) g_f_key_event = 2; 
+              else if (idx == 114) g_f_key_event = 3; 
+              else pushKey(idx); 
             }
           }
       } else { 
@@ -206,7 +219,7 @@ void loop() {
     } else if (esc_state == 1) {
       if (sK == '[' || sK == 'O') { esc_buf[esc_idx++] = sK; esc_state = 2; } else { if (g_show_menu) g_menu_cmd = 4; esc_state = 0; }
     } else if (esc_state == 2) {
-      if (esc_idx < 7) esc_buf[esc_idx++] = sK;
+      if (esc_idx < 7) { esc_buf[esc_idx++] = sK; esc_buf[esc_idx] = 0; }
       if ((sK >= 'A' && sK <= 'Z') || sK == '~') {
         if (esc_buf[0] == '[') {
           if (sK == 'A') { if (g_show_menu) g_menu_cmd = 1; else ser_joy_up = true; }
@@ -221,6 +234,9 @@ void loop() {
       }
     }
   }
+
+  if (!g_boot_ready) { yield(); return; }
+  if (g_emu_paused && !g_show_menu) { yield(); return; }
   if (g_show_menu) return;
   uint32_t irq_joy = spin_lock_blocking(res_lock);
   apple2_set_paddle(0, (joy_left || ser_joy_left) ? 0 : ((joy_right || ser_joy_right) ? 255 : 128));
@@ -281,9 +297,21 @@ void setup1() {
   pinMode(BTN_MENU, INPUT_PULLUP); pinMode(BTN_ALT, INPUT_PULLUP);
   SPI1.setRX(SD_MISO); SPI1.setTX(SD_MOSI); SPI1.setSCK(SD_SCK);
   bool sd_ok = false;
-  for (int i = 0; i < 3; i++) { if (SD.begin(SD_CS, SPI1)) { sd_ok = true; break; } delay(100); }
+  Serial.print("SD: Initializing SPI1 (10MHz)... ");
+  // 降低頻率至 10MHz 以提高杜邦線連接的穩定性
+  // RP2040 參數順序為 (csPin, frequency, spi)
+  for (int i = 0; i < 5; i++) { 
+    if (SD.begin(SD_CS, 10000000, SPI1)) { 
+      sd_ok = true; 
+      Serial.println("OK!");
+      break; 
+    } 
+    Serial.print(".");
+    delay(200); 
+  }
   
   if (sd_ok) {
+    // ... 原有邏輯 ...
     if (SD.exists("/LASTDISK.TXT")) {
       File f = SD.open("/LASTDISK.TXT", FILE_READ);
       if (f) {
@@ -297,6 +325,7 @@ void setup1() {
     if (!diskFile) diskFile = SD.open(g_current_disk_path, "r");
     if (diskFile) loadSingleTrack(0);
   }
+  g_boot_ready = true; // 初始化完成，允許 Core 0 開始模擬
 }
 void drawString(uint16_t x, uint16_t y, String s, uint16_t color, uint16_t bg) {
   const uint8_t* font = apple2_get_char_rom_ptr(); s.toUpperCase(); 
@@ -316,11 +345,24 @@ void drawDiskMenu() {
 
 void loop1() {
   unsigned long now = millis();
-  joy_up = (digitalRead(BTN_UP) == LOW); joy_down = (digitalRead(BTN_DOWN) == LOW);
-  joy_left = (digitalRead(BTN_LEFT) == LOW); joy_right = (digitalRead(BTN_RIGHT) == LOW);
-  joy_btn0 = (digitalRead(BTN_A) == LOW); joy_btn1 = (digitalRead(BTN_B) == LOW);
-  static bool last_menu_p = false; bool menu_p = (digitalRead(BTN_MENU) == LOW);
-  if (menu_p && !last_menu_p) { g_f_key_event = 3; } last_menu_p = menu_p;
+  
+  // 將 GPIO 按鍵讀取移到最前面，且不受 40ms 幀率限制
+  joy_up = (digitalRead(BTN_UP) == LOW); 
+  joy_down = (digitalRead(BTN_DOWN) == LOW);
+  joy_left = (digitalRead(BTN_LEFT) == LOW); 
+  joy_right = (digitalRead(BTN_RIGHT) == LOW);
+  joy_btn0 = (digitalRead(BTN_A) == LOW); 
+  joy_btn1 = (digitalRead(BTN_B) == LOW);
+
+  // 修正 Menu 按鍵：增加放開後的保護邏輯，防止重複觸發
+  static bool last_menu_p = false; 
+  bool menu_p = (digitalRead(BTN_MENU) == LOW);
+  if (menu_p && !last_menu_p && !g_show_menu) { 
+    g_f_key_event = 3; 
+  } 
+  last_menu_p = menu_p;
+
+  // 鍵盤矩陣掃描 (維持現狀)
   for (int row = 0; row < 8; row++) {
     byte rS = (1 << row); fastWrite(LATCH_PIN, 0); shiftOut(DATA_OUT_PIN, CLOCK_PIN, MSBFIRST, 0); shiftOut(DATA_OUT_PIN, CLOCK_PIN, MSBFIRST, rS);
     fastWrite(LATCH_PIN, 1); delayMicroseconds(5); fastWrite(LATCH_PIN, 0); delayMicroseconds(1); fastWrite(LATCH_PIN, 1);
@@ -346,6 +388,8 @@ void loop1() {
       }
     }
   }
+  if (g_f_key_event == 1) { g_f_key_event = 0; uint32_t irq = spin_lock_blocking(res_lock); apple2_warm_reset(); spin_unlock(res_lock, irq); Serial.println("SYSTEM: Warm Reset"); }
+  if (g_f_key_event == 2) { g_f_key_event = 0; uint32_t irq = spin_lock_blocking(res_lock); apple2_reset(); spin_unlock(res_lock, irq); loadSingleTrack(0); Serial.println("SYSTEM: Cold Reset"); }
   if (g_f_key_event == 3) { g_f_key_event = 0; scanDiskFiles(); if (disk_file_count > 0) { g_emu_paused = true; g_show_menu = true; selected_file_idx = 0; drawDiskMenu(); } }
   if (g_show_menu) {
     static uint32_t last_m_nav = 0;
