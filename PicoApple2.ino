@@ -1,4 +1,4 @@
-﻿#include <SPI.h>
+#include <SPI.h>
 #include <SD.h>
 #include <Arduino.h>
 #include <Apple2Core.h>
@@ -121,21 +121,50 @@ byte myShiftIn(uint8_t dP, uint8_t cP) {
   return data;
 }
 
+char __flush_debug_buf[256];
+
 void flushDirtyTrack() {
   if (!diskFile) return;
+  __flush_debug_buf[0] = 0;
+  
   uint32_t irq = spin_lock_blocking(res_lock);
   if (apple2_is_track_dirty()) {
-    uint8_t target_track = last_loaded_track; uint32_t offset = (uint32_t)target_track * 4096;
-    if (diskFile.seek(offset)) { diskFile.read(track_buffer, 4096); }
+    uint8_t target_track = last_loaded_track; 
+    uint32_t offset = (uint32_t)target_track * 4096;
+    int seek1 = diskFile.seek(offset) ? 1 : 0;
+    if (seek1) { diskFile.read(track_buffer, 4096); }
+    
     uint8_t valid_count = apple2_get_denibblized_track(track_buffer);
+    uint32_t denib_err = apple2_get_denibblize_error();
+    
+    int seek2 = 0;
+    int write_sz = -1;
+    int reopen_ok = -1;
+    
     if (valid_count >= 1) {
-      if (diskFile.seek(offset)) {
-        diskFile.write(track_buffer, 4096); diskFile.flush(); diskFile.close();
+      seek2 = diskFile.seek(offset) ? 1 : 0;
+      if (seek2) {
+        write_sz = (int)diskFile.write(track_buffer, 4096); 
+        diskFile.flush(); diskFile.close();
+        
         diskFile = SD.open(g_current_disk_path, "r+");
+        if (diskFile) { reopen_ok = 1; }
+        else { 
+            reopen_ok = 0; 
+            diskFile = SD.open(g_current_disk_path, "r"); 
+        }
       }
     }
+    
+    snprintf(__flush_debug_buf, sizeof(__flush_debug_buf), "\n[FLUSH] T:%d S1:%d Val:%d Err:%04lX S2:%d W:%d ReOp:%d\n", target_track, seek1, valid_count, (unsigned long)denib_err, seek2, write_sz, reopen_ok);
+    Serial.print(__flush_debug_buf);
   }
   spin_unlock(res_lock, irq);
+  
+  if (__flush_debug_buf[0] != 0) {
+     Serial.print(__flush_debug_buf);
+     __flush_debug_buf[0] = 0;
+  }
 }
 
 void loadSingleTrack(uint8_t track) {
