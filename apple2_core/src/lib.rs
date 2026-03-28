@@ -23,6 +23,8 @@ pub static mut RAM_48K: [u8; 49152] = [0u8; 49152];
 pub static mut LC_RAM_16K: [u8; 16384] = [0u8; 16384];
 pub static mut TRACK_DATA_RAW: [u8; 6656] = [0u8; 6656];
 pub static mut TRACK_DATA_DIRTY: [bool; 6656] = [false; 6656];
+pub static mut WRITE_LOG: [u8; 1024] = [0; 1024];
+pub static mut WRITE_LOG_IDX: usize = 0;
 
 static mut MACHINE: Option<Apple2Machine> = None;
 
@@ -123,17 +125,26 @@ pub extern "C" fn apple2_is_track_dirty() -> bool {
     unsafe { if let Some(ref m) = *addr_of_mut!(MACHINE) { return m.mem.disk2.is_dirty; } false }
 }
 
+pub static mut LAST_DENIB_ERROR: u32 = 0;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn apple2_get_denibblize_error() -> u32 {
+    unsafe { LAST_DENIB_ERROR }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn apple2_get_denibblized_track(out_buffer: *mut u8) -> u8 {
     unsafe {
         if let Some(ref mut m) = *addr_of_mut!(MACHINE) {
             let buf = &mut *(out_buffer as *mut [u8; 4096]);
-            let raw_ptr = addr_of_mut!(TRACK_DATA_RAW) as *mut [u8; 6656];
-            let dirty_ptr = addr_of_mut!(TRACK_DATA_DIRTY) as *mut [bool; 6656];
+            let raw_ptr = addr_of_mut!(TRACK_DATA_RAW) as *const [u8; 6656];
+            let dirty_ptr = addr_of_mut!(TRACK_DATA_DIRTY) as *const [bool; 6656];
+            LAST_DENIB_ERROR = 0;
             let sector_count = nibble::denibblize_track(&*raw_ptr, &*dirty_ptr, 6656, m.mem.disk2.loaded_track_num, buf);
-            if sector_count > 0 {
+            if sector_count > 0 || LAST_DENIB_ERROR != 0 {
+                // Return exactly what was recorded!
                 m.mem.disk2.is_dirty = false;
-                (*dirty_ptr).fill(false);
+                (addr_of_mut!(TRACK_DATA_DIRTY) as *mut [bool; 6656]).as_mut().unwrap().fill(false);
             }
             return sector_count;
         }
@@ -170,6 +181,18 @@ pub extern "C" fn apple2_load_track(track: u8, data: *const u8, size: u32) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn apple2_load_disk(data: *const u8, size: u32) { apple2_load_track(0, data, size); }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn apple2_get_write_log(out_buffer: *mut u8) -> u16 {
+    unsafe {
+        let count = WRITE_LOG_IDX.min(1024);
+        for i in 0..count {
+            *out_buffer.add(i) = WRITE_LOG[i];
+        }
+        WRITE_LOG_IDX = 0;
+        count as u16
+    }
+}
 
 #[cfg(not(test))]
 #[panic_handler]

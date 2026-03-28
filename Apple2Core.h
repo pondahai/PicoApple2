@@ -29,6 +29,8 @@ const uint8_t* apple2_get_char_rom_ptr();
 bool apple2_get_disk_motor_status();
 bool apple2_is_track_dirty(); // 檢查當前磁軌是否被修改
 uint8_t apple2_get_denibblized_track(uint8_t* out_buffer); // 獲取去編碼後的 4096 bytes 扇區資料，回傳有效扇區數
+uint32_t apple2_get_denibblize_error(); // 獲取 denibblize 失敗原因
+uint16_t apple2_get_write_log(uint8_t* out_buffer); // 獲取 CPU 實體寫入日誌
 int32_t apple2_needs_disk_reload(); 
 void apple2_load_track(uint8_t track, const uint8_t* data, uint32_t size);
 

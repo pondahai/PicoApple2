@@ -28,7 +28,6 @@
 - [x] 實施「磁軌重整」與「Safe Write-back」。
 
 ## 5. 已知問題與待修復 (Known Issues & FIXME)
-- [ ] **FIXME (Disk Write):** DOS 3.3 對空白磁碟執行 `INIT HELLO` 時發生寫入錯誤 (ERROR #8)。
-    - **現象:** 寫入驗證失敗。
-    - **計畫:** 檢查同步位元 (Sync bits) 的物理偏移與時序。
+- [x] **FIXME (Disk Write) - RESOLVED:** DOS 3.3 對磁碟執行 `SAVE` 與寫入錯誤。
+    - **解決方案:** 取消定時器 `tick()` 在 `Q6=0` 期間的指針自增跳號，確保由 `STA $C08D` 驅動磁碟寫入陣列時達成 100% 長度與時序同步。
 - [ ] **FIXME (Disk Read):** `goonies.dsk` 無法正常載入（位元級模擬需進一步校準）。

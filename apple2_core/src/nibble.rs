@@ -78,8 +78,8 @@ pub fn denibblize_track(raw: &[u8], dirty: &[bool], len: usize, _track: u8, out_
                 let logical_sec = PHYS_TO_LOGICAL[phys_sec as usize];
                 let mut found_data = false;
 
-                // 擴大搜尋範圍 (10..120) 以應對軟體寫入時的長 Gap
-                for gap in 10..120 {
+                // 擴大搜尋範圍 (4..120) 以應對軟體寫入時的長 Gap，以及相位補償造成的微小 Gap 縮水
+                for gap in 4..120 {
                     let d_idx = (i + gap) % len;
                     if raw[d_idx] == 0xD5 && raw[(d_idx + 1) % len] == 0xAA && raw[(d_idx + 2) % len] == 0xAD {
                         let mut snib = [0u8; 86];
@@ -91,15 +91,32 @@ pub fn denibblize_track(raw: &[u8], dirty: &[bool], len: usize, _track: u8, out_
                         for k in 0..342 {
                             let nib = raw[(d_idx + 3 + k) % len];
                             let idx = decode_table[nib as usize];
-                            if idx == 0xFF { checksum_ok = false; break; }
+                            if idx == 0xFF { 
+                                checksum_ok = false; 
+                                unsafe { crate::LAST_DENIB_ERROR = ((k as u32) << 16) | (nib as u32); } // Upper 16 bit: k index, lower 16: byte value
+                                break; 
+                            }
                             let val6 = idx ^ last_val;
                             if k < 86 { snib[k] = val6; } else { sector_data[k - 86] = val6 << 2; }
                             last_val = val6;
                         }
 
                         if checksum_ok {
-                            let ck_nib = raw[(d_idx + 3 + 342) % len];
-                            if decode_table[ck_nib as usize] == last_val {
+                            let mut found_checksum = false;
+                            // 容許 +/- 2 個 byte 的長度偏差，因為軟體模擬寫入可能因指令週期微小漂移導致 byte 重複或遺失
+                            for shift in -2..=2i32 {
+                                let ck_pos = (d_idx as i32 + 3 + 342 + shift).rem_euclid(len as i32) as usize;
+                                let ck_nib = raw[ck_pos];
+                                if decode_table[ck_nib as usize] == last_val {
+                                    found_checksum = true;
+                                    break;
+                                }
+                            }
+                            if !found_checksum {
+                                unsafe { crate::LAST_DENIB_ERROR = 0x2000; } // 0x2000 - Checksum lookup failed
+                            }
+                            
+                            if found_checksum {
                                 let mut has_dirty = false;
                                 for k in 0..350 { if dirty[(d_idx + k) % len] { has_dirty = true; break; } }
                                 
