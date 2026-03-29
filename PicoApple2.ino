@@ -44,7 +44,7 @@ spin_lock_t *res_lock;
 static uint16_t scanline_buffers[2][280];
 static uint8_t current_buf_idx = 0;
 
-#define KEY_FIFO_SIZE 32
+#define KEY_FIFO_SIZE 128
 volatile uint8_t g_key_fifo[KEY_FIFO_SIZE];
 volatile int g_key_head = 0;
 volatile int g_key_tail = 0;
@@ -202,44 +202,59 @@ void setup() {
   spin_unlock(res_lock, irq);
 }
 void loop() {
-  static int esc_state = 0; static char esc_buf[8]; static int esc_idx = 0;
+  static int esc_state = 0; 
+  static char esc_buf[8]; 
+  static int esc_idx = 0;
+  static int proto_state = 0;
+  static uint8_t proto_cmd[3];
 
-  // 優先處理 Serial 輸入，確保 USB Stack 不會因為 Core 1 阻塞而死鎖
   while (Serial.available() > 0) {
     uint8_t sK = Serial.read();
+    
+    // 非阻塞協議解析 (0x02 開頭)
+    if (proto_state > 0) {
+      proto_cmd[proto_state-1] = sK;
+      if (++proto_state > 3) {
+        uint8_t type = proto_cmd[0];
+        uint8_t idx = proto_cmd[1];
+        uint8_t stat = proto_cmd[2];
+        bool b = (stat == 1);
+        if (type == 'J') {
+          if (b && g_show_menu) { if (idx == 0) g_menu_cmd = 1; else if (idx == 1) g_menu_cmd = 2; else if (idx == 4) g_menu_cmd = 3; else if (idx == 5) g_menu_cmd = 4; }
+          if (idx == 0) ser_joy_up = b; else if (idx == 1) ser_joy_down = b; else if (idx == 2) ser_joy_left = b; else if (idx == 3) ser_joy_right = b; else if (idx == 4) ser_joy_btn0 = b; else if (idx == 5) ser_joy_btn1 = b;
+        } else if (type == 'K' && stat == 1) {
+          if (g_show_menu) { if (idx == 0x0D) g_menu_cmd = 3; else if (idx == 0x1B) g_menu_cmd = 4; }
+          if (idx == 112) g_f_key_event = 1; 
+          else if (idx == 113) g_f_key_event = 2; 
+          else if (idx == 114) g_f_key_event = 3; 
+          else pushKey(idx); 
+        }
+        proto_state = 0;
+      }
+      continue;
+    }
+
     if (esc_state == 0) {
-      if (sK == 0x1B) { esc_state = 1; esc_idx = 0; }
-      else if (sK == 0x02) { 
-          uint32_t timeout = micros() + 1000; while (Serial.available() < 3 && micros() < timeout); 
-          if (Serial.available() >= 3) {
-            uint8_t type = Serial.read(); uint8_t idx = Serial.read(); uint8_t stat = Serial.read();
-            bool b = (stat == 1);
-            if (type == 'J') {
-              if (b && g_show_menu) { if (idx == 0) g_menu_cmd = 1; else if (idx == 1) g_menu_cmd = 2; else if (idx == 4) g_menu_cmd = 3; else if (idx == 5) g_menu_cmd = 4; }
-              if (idx == 0) ser_joy_up = b; else if (idx == 1) ser_joy_down = b; else if (idx == 2) ser_joy_left = b; else if (idx == 3) ser_joy_right = b; else if (idx == 4) ser_joy_btn0 = b; else if (idx == 5) ser_joy_btn1 = b;
-            } else if (type == 'K' && stat == 1) {
-              if (g_show_menu) { if (idx == 0x0D) g_menu_cmd = 3; else if (idx == 0x1B) g_menu_cmd = 4; }
-              if (idx == 112) g_f_key_event = 1; 
-              else if (idx == 113) g_f_key_event = 2; 
-              else if (idx == 114) g_f_key_event = 3; 
-              else pushKey(idx); 
-            }
-          }
-      } else { 
-        if (sK == 127 || sK == 8) sK = 0x08; else if (sK == '\r' || sK == '\n') sK = 0x0D; else if (sK >= 'a' && sK <= 'z') sK -= 32; 
+      if (sK == 0x02) { proto_state = 1; }
+      else if (sK == 0x1B) { esc_state = 1; esc_idx = 0; }
+      else { 
+        if (sK == 127 || sK == 8) sK = 0x08; 
+        else if (sK == '\r' || sK == '\n') sK = 0x0D; 
+        else if (sK >= 'a' && sK <= 'z') sK -= 32; 
         pushKey(sK); 
       }
     } else if (esc_state == 1) {
-      if (sK == '[' || sK == 'O') { esc_buf[esc_idx++] = sK; esc_state = 2; } else { if (g_show_menu) g_menu_cmd = 4; esc_state = 0; }
+      if (sK == '[' || sK == 'O') { esc_buf[esc_idx++] = sK; esc_state = 2; } 
+      else { if (g_show_menu) g_menu_cmd = 4; esc_state = 0; }
     } else if (esc_state == 2) {
       if (esc_idx < 7) { esc_buf[esc_idx++] = sK; esc_buf[esc_idx] = 0; }
       if ((sK >= 'A' && sK <= 'Z') || sK == '~') {
         if (esc_buf[0] == '[') {
           if (sK == 'A') { if (g_show_menu) g_menu_cmd = 1; else ser_joy_up = true; }
           else if (sK == 'B') { if (g_show_menu) g_menu_cmd = 2; else ser_joy_down = true; }
-          else if (String(esc_buf).indexOf("11~") >= 0 || String(esc_buf).indexOf("OP") >= 0) g_f_key_event = 1;
-          else if (String(esc_buf).indexOf("12~") >= 0 || String(esc_buf).indexOf("OQ") >= 0) g_f_key_event = 2;
-          else if (String(esc_buf).indexOf("13~") >= 0 || String(esc_buf).indexOf("OR") >= 0) g_f_key_event = 3;
+          else if (strcmp(esc_buf, "[11~") == 0 || strcmp(esc_buf, "OP") == 0) g_f_key_event = 1;
+          else if (strcmp(esc_buf, "[12~") == 0 || strcmp(esc_buf, "OQ") == 0) g_f_key_event = 2;
+          else if (strcmp(esc_buf, "[13~") == 0 || strcmp(esc_buf, "OR") == 0) g_f_key_event = 3;
         } else if (esc_buf[0] == 'O') {
           if (sK == 'P') g_f_key_event = 1; else if (sK == 'Q') g_f_key_event = 2; else if (sK == 'R') g_f_key_event = 3;
         }
