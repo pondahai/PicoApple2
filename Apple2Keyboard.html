@@ -121,23 +121,26 @@
         }
 
         // 核心邏輯：統一處理按鍵事件
-        async function handleKeyEvent(e, isDown) {
-            if (!writer) return true; // 沒連線就不處理
+        function handleKeyEvent(e, isDown) {
+            if (!writer || e._handledByPico) return true; 
 
             // 1. 處理搖桿 (方向鍵、換頁鍵)
             if (joyMap[e.key] !== undefined) {
-                await sendProtocol('J', joyMap[e.key], isDown ? 1 : 0);
-                return false; // 攔截，不交給終端機
+                sendProtocol('J', joyMap[e.key], isDown ? 1 : 0);
+                e._handledByPico = true;
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                return false; 
             }
 
-            if (!isDown) return true; // 鍵盤類只處理 Press
+            if (!isDown) return true; 
 
             document.getElementById('key-val').innerText = e.key;
 
             // 2. 系統功能鍵
-            if (e.key === 'F1') { await sendRaw([0x1B, 0x4F, 0x50]); return false; }
-            if (e.key === 'F2') { await sendRaw([0x1B, 0x4F, 0x51]); return false; }
-            if (e.key === 'F3') { await sendRaw([0x1B, 0x4F, 0x52]); return false; }
+            if (e.key === 'F1') { sendRaw([0x1B, 0x4F, 0x50]); e._handledByPico = true; e.preventDefault(); e.stopImmediatePropagation(); return false; }
+            if (e.key === 'F2') { sendRaw([0x1B, 0x4F, 0x51]); e._handledByPico = true; e.preventDefault(); e.stopImmediatePropagation(); return false; }
+            if (e.key === 'F3') { sendRaw([0x1B, 0x4F, 0x52]); e._handledByPico = true; e.preventDefault(); e.stopImmediatePropagation(); return false; }
 
             // 3. Apple II ASCII 鍵盤
             let charCode = 0;
@@ -149,24 +152,30 @@
             else if (e.key.length === 1) charCode = e.key.toUpperCase().charCodeAt(0);
 
             if (charCode > 0) {
-                await sendProtocol('K', charCode, 1);
-                return false; // 攔截
+                sendProtocol('K', charCode, 1);
+                e._handledByPico = true;
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                return false; 
             }
             return true;
         }
 
-        // 監聽全局事件 (頁面空白處)
-        window.onkeydown = (e) => { if (e.repeat && !joyMap[e.key]) return; handleKeyEvent(e, true).then(r => { if(!r) e.preventDefault(); }); };
-        window.onkeyup = (e) => { handleKeyEvent(e, false).then(r => { if(!r) e.preventDefault(); }); };
+        // 監聽全局事件 (僅處理那些沒被終端機攔截到的事件)
+        window.addEventListener('keydown', (e) => { 
+            handleKeyEvent(e, true);
+        }, true); // 使用 Capture 模式優先攔截
+        
+        window.addEventListener('keyup', (e) => { 
+            handleKeyEvent(e, false);
+        }, true);
 
         // [關鍵修復] 攔截終端機內部的按鍵事件
-        term.attachCustomKeyEventHandler(async (e) => {
+        term.attachCustomKeyEventHandler((e) => {
             if (e.type === 'keydown') {
-                const shouldPassThrough = await handleKeyEvent(e, true);
-                return shouldPassThrough; // 返回 true 則 xterm 繼續處理，false 則 xterm 忽略
+                return handleKeyEvent(e, true);
             } else if (e.type === 'keyup') {
-                const shouldPassThrough = await handleKeyEvent(e, false);
-                return shouldPassThrough;
+                return handleKeyEvent(e, false);
             }
             return true;
         });
