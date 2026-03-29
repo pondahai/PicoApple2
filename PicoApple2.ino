@@ -125,46 +125,30 @@ char __flush_debug_buf[256];
 
 void flushDirtyTrack() {
   if (!diskFile) return;
-  __flush_debug_buf[0] = 0;
   
   uint32_t irq = spin_lock_blocking(res_lock);
-  if (apple2_is_track_dirty()) {
+  bool is_dirty = apple2_is_track_dirty();
+  if (is_dirty) {
     uint8_t target_track = last_loaded_track; 
     uint32_t offset = (uint32_t)target_track * 4096;
-    int seek1 = diskFile.seek(offset) ? 1 : 0;
-    if (seek1) { diskFile.read(track_buffer, 4096); }
     
-    uint8_t valid_count = apple2_get_denibblized_track(track_buffer);
-    uint32_t denib_err = apple2_get_denibblize_error();
-    
-    int seek2 = 0;
-    int write_sz = -1;
-    int reopen_ok = -1;
-    
-    if (valid_count >= 1) {
-      seek2 = diskFile.seek(offset) ? 1 : 0;
-      if (seek2) {
-        write_sz = (int)diskFile.write(track_buffer, 4096); 
-        diskFile.flush(); diskFile.close();
-        
-        diskFile = SD.open(g_current_disk_path, "r+");
-        if (diskFile) { reopen_ok = 1; }
-        else { 
-            reopen_ok = 0; 
-            diskFile = SD.open(g_current_disk_path, "r"); 
-        }
-      }
+    // 讀取當前磁軌數據 (由 Rust 核心進行 Denibblize)
+    // 我們需要先從 SD 讀取原始數據作為底層，再覆蓋更新的部分
+    if (diskFile.seek(offset)) {
+       diskFile.read(track_buffer, 4096);
     }
     
-    snprintf(__flush_debug_buf, sizeof(__flush_debug_buf), "\n[FLUSH] T:%d S1:%d Val:%d Err:%04lX S2:%d W:%d ReOp:%d\n", target_track, seek1, valid_count, (unsigned long)denib_err, seek2, write_sz, reopen_ok);
-    Serial.print(__flush_debug_buf);
+    uint8_t valid_count = apple2_get_denibblized_track(track_buffer);
+    
+    if (valid_count >= 1) {
+      if (diskFile.seek(offset)) {
+        size_t written = diskFile.write(track_buffer, 4096); 
+        diskFile.flush(); // 強制寫入物理磁區，但不關閉文件
+        Serial.printf("[SD] Flush Track %d: %d bytes written\n", target_track, written);
+      }
+    }
   }
   spin_unlock(res_lock, irq);
-  
-  if (__flush_debug_buf[0] != 0) {
-     Serial.print(__flush_debug_buf);
-     __flush_debug_buf[0] = 0;
-  }
 }
 
 void loadSingleTrack(uint8_t track) {
@@ -279,11 +263,19 @@ void loop() {
     spin_unlock(res_lock, irq);
   }
   unsigned long start_t = micros();
+  static bool last_motor_on = false;
   uint32_t irq_t = spin_lock_blocking(res_lock);
   uint32_t cycles = apple2_tick(); 
   bool motor_on = apple2_get_disk_motor_status();
   int32_t reload_track = apple2_needs_disk_reload();
   spin_unlock(res_lock, irq_t);
+
+  // 延遲寫入邏輯：當馬達從 ON 變為 OFF 時，將髒數據刷入 SD 卡
+  if (last_motor_on && !motor_on) {
+    flushDirtyTrack();
+  }
+  last_motor_on = motor_on;
+
   if (reload_track >= 0) { loadSingleTrack((uint8_t)reload_track); }
   if (!motor_on) {
     unsigned long expected = (unsigned long)((float)cycles / 1.023f);
