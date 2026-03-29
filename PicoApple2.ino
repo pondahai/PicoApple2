@@ -238,10 +238,13 @@ void loop() {
       if (sK == 0x02) { proto_state = 1; }
       else if (sK == 0x1B) { esc_state = 1; esc_idx = 0; }
       else { 
+        static uint8_t last_raw_sk = 0;
         if (sK == 127 || sK == 8) sK = 0x08; 
-        else if (sK == '\r' || sK == '\n') sK = 0x0D; 
+        else if (sK == '\r') sK = 0x0D; 
+        else if (sK == '\n') { if (last_raw_sk == '\r') { last_raw_sk = sK; continue; } sK = 0x0D; }
         else if (sK >= 'a' && sK <= 'z') sK -= 32; 
         pushKey(sK); 
+        last_raw_sk = sK;
       }
     } else if (esc_state == 1) {
       if (sK == '[' || sK == 'O') { esc_buf[esc_idx++] = sK; esc_state = 2; } 
