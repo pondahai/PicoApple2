@@ -108,6 +108,12 @@ int disk_file_count = 0;
 int selected_file_idx = 0;
 volatile uint8_t g_menu_cmd = 0;
 
+// Cross-core SD operation flags
+volatile bool req_scan_disks = false;
+volatile bool ack_scan_disks = false;
+volatile int req_load_disk_idx = -1;
+
+
 uint8_t keyState[8][8] = {0};
 uint8_t lastKeyState[8][8] = {0};
 unsigned long lastKeyTime[8][8] = {0};
@@ -267,6 +273,25 @@ void loop() {
   }
 
   if (!g_boot_ready) { yield(); return; }
+
+  // 處理來自 Core 1 的 SD 卡操作請求
+  if (req_scan_disks && !ack_scan_disks) {
+    scanDiskFiles();
+    ack_scan_disks = true;
+  }
+  if (req_load_disk_idx >= 0) {
+    if (disk_file_count > 0 && req_load_disk_idx < disk_file_count) {
+      flushDirtyTrack(); if (diskFile) diskFile.close(); 
+      g_current_disk_path = "/" + disk_files[req_load_disk_idx];
+      diskFile = SD.open(g_current_disk_path, "r+"); if (!diskFile) diskFile = SD.open(g_current_disk_path, "r");
+      if (SD.exists("/LASTDISK.TXT")) { SD.remove("/LASTDISK.TXT"); }
+      File f = SD.open("/LASTDISK.TXT", FILE_WRITE); if (f) { f.println(g_current_disk_path); f.close(); }
+      loadSingleTrack(0);
+    }
+    req_load_disk_idx = -1;
+    g_emu_paused = false;
+  }
+
   if (g_emu_paused && !g_show_menu) { yield(); return; }
   if (g_show_menu) return;
   uint32_t irq_joy = spin_lock_blocking(res_lock);
@@ -428,26 +453,38 @@ void loop1() {
     }
   }
   if (g_f_key_event == 1) { g_f_key_event = 0; uint32_t irq = spin_lock_blocking(res_lock); apple2_warm_reset(); spin_unlock(res_lock, irq); Serial.println("SYSTEM: Warm Reset"); }
-  if (g_f_key_event == 2) { g_f_key_event = 0; uint32_t irq = spin_lock_blocking(res_lock); apple2_reset(); spin_unlock(res_lock, irq); loadSingleTrack(0); Serial.println("SYSTEM: Cold Reset"); }
-  if (g_f_key_event == 3) { g_f_key_event = 0; scanDiskFiles(); if (disk_file_count > 0) { g_emu_paused = true; g_show_menu = true; selected_file_idx = 0; drawDiskMenu(); } }
+  if (g_f_key_event == 2) { g_f_key_event = 0; uint32_t irq = spin_lock_blocking(res_lock); apple2_reset(); spin_unlock(res_lock, irq); Serial.println("SYSTEM: Cold Reset"); }
+  if (g_f_key_event == 3) { 
+    g_f_key_event = 0; 
+    g_emu_paused = true; 
+    req_scan_disks = true; 
+    ack_scan_disks = false; 
+    g_show_menu = true; 
+    tft_dma.fillScreen(0x7BEF); 
+    drawString(30, 30, "SCANNING SD...", 0xFFFF, 0x7BEF);
+  }
   if (g_show_menu) {
+    if (req_scan_disks) {
+        if (ack_scan_disks) {
+            req_scan_disks = false;
+            selected_file_idx = 0;
+            if (disk_file_count > 0) drawDiskMenu();
+            else { drawString(30, 50, "NO DSK FILES FOUND", 0xF800, 0x7BEF); }
+        }
+        return;
+    }
     static uint32_t last_m_nav = 0;
     bool b_u = joy_up || (g_menu_cmd == 1); bool b_d = joy_down || (g_menu_cmd == 2); bool b_e = joy_btn0 || (g_menu_cmd == 3); bool b_q = joy_btn1 || (g_menu_cmd == 4);
     if (millis() - last_m_nav > 200) {
-      if (b_u) { selected_file_idx = (selected_file_idx - 1 + disk_file_count) % disk_file_count; drawDiskMenu(); last_m_nav = millis(); }
-      else if (b_d) { selected_file_idx = (selected_file_idx + 1) % disk_file_count; drawDiskMenu(); last_m_nav = millis(); }
-      else if (b_e) {
-        if (disk_file_count > 0) {
-          g_emu_paused = true; flushDirtyTrack(); if (diskFile) diskFile.close(); 
-          g_current_disk_path = "/" + disk_files[selected_file_idx];
-          diskFile = SD.open(g_current_disk_path, "r+"); if (!diskFile) diskFile = SD.open(g_current_disk_path, "r");
-          if (SD.exists("/LASTDISK.TXT")) { SD.remove("/LASTDISK.TXT"); }
-          File f = SD.open("/LASTDISK.TXT", FILE_WRITE); if (f) { f.println(g_current_disk_path); f.close(); }
-          loadSingleTrack(0);
+      if (disk_file_count > 0) {
+        if (b_u) { selected_file_idx = (selected_file_idx - 1 + disk_file_count) % disk_file_count; drawDiskMenu(); last_m_nav = millis(); }
+        else if (b_d) { selected_file_idx = (selected_file_idx + 1) % disk_file_count; drawDiskMenu(); last_m_nav = millis(); }
+        else if (b_e) {
+          req_load_disk_idx = selected_file_idx; // 交給 Core 0 處理
+          g_show_menu = false; tft_dma.fillScreen(0); last_m_nav = millis();
         }
-        g_show_menu = false; g_emu_paused = false; tft_dma.fillScreen(0); last_m_nav = millis();
       }
-      else if (b_q) { g_show_menu = false; g_emu_paused = false; tft_dma.fillScreen(0); last_m_nav = millis(); }
+      if (b_q) { g_show_menu = false; g_emu_paused = false; tft_dma.fillScreen(0); last_m_nav = millis(); }
       g_menu_cmd = 0;
     }
     return;
