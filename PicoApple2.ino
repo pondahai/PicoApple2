@@ -112,6 +112,7 @@ volatile uint8_t g_menu_cmd = 0;
 volatile bool req_scan_disks = false;
 volatile bool ack_scan_disks = false;
 volatile int req_load_disk_idx = -1;
+volatile bool req_reload_track0 = false;
 
 
 uint8_t keyState[8][8] = {0};
@@ -291,6 +292,10 @@ void loop() {
     req_load_disk_idx = -1;
     g_emu_paused = false;
   }
+  if (req_reload_track0) {
+    req_reload_track0 = false;
+    loadSingleTrack(0);
+  }
 
   if (g_emu_paused && !g_show_menu) { yield(); return; }
   if (g_show_menu) return;
@@ -453,7 +458,14 @@ void loop1() {
     }
   }
   if (g_f_key_event == 1) { g_f_key_event = 0; uint32_t irq = spin_lock_blocking(res_lock); apple2_warm_reset(); spin_unlock(res_lock, irq); Serial.println("SYSTEM: Warm Reset"); }
-  if (g_f_key_event == 2) { g_f_key_event = 0; uint32_t irq = spin_lock_blocking(res_lock); apple2_reset(); spin_unlock(res_lock, irq); Serial.println("SYSTEM: Cold Reset"); }
+  if (g_f_key_event == 2) { 
+    g_f_key_event = 0; 
+    uint32_t irq = spin_lock_blocking(res_lock); 
+    apple2_reset(); 
+    spin_unlock(res_lock, irq); 
+    req_reload_track0 = true; // 要求 Core 0 重新載入 Track 0
+    Serial.println("SYSTEM: Cold Reset"); 
+  }
   if (g_f_key_event == 3) { 
     g_f_key_event = 0; 
     g_emu_paused = true; 
