@@ -20,7 +20,7 @@
 
 本專案**不提供**且**不包含**任何受版權保護的 Apple II ROM 檔案或軟體。
 
-1.  **使用者責任**：玩家必須自行合法取得 Apple II 的 System ROM (`apple2_sys.rom`)、字體 ROM (`apple2_char.rom`) 與 Disk II 控制卡 ROM (`disk2.rom`)。
+1.  **使用者責任**：玩家必須自行合法取得 Apple II 的 System ROM (`apple2_sys.rom`)、字體 ROM (`apple2_char.rom`) 與 Disk II 控制卡 ROM (`disk2_p5.rom`)。
 2.  **檔案放置**：請將取得的 ROM 檔案放置於 `apple2_core/src/` 目錄下後再進行編譯。
 3.  **合規使用**：本專案僅供學術研究與個人復刻體驗使用，請確保您遵守當地的版權法律規範。
 
