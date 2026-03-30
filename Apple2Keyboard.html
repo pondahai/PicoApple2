@@ -52,6 +52,13 @@
                     <div><kbd>F3</kbd> Disk Menu</div>
                 </div>
             </div>
+            <div class="key-group">
+                <h4>📋 Paste Settings</h4>
+                <div style="font-size: 12px; margin-bottom: 5px;">Typing Delay: <span id="delay-val">30</span>ms</div>
+                <input type="range" id="paste-delay" min="10" max="200" value="30" style="width: 100%;">
+                <button id="btn-paste" class="btn" style="width: 100%; margin-top: 10px; padding: 5px; font-size: 12px; background: #555;">📋 MANUALLY PASTE</button>
+                <p style="font-size: 11px; color: #aaa; margin-top: 5px;">Tip: Paste with Ctrl+V into terminal</p>
+            </div>
             <div style="margin-top:auto; font-size: 14px; color: #888;">
                 Last Key: <span id="key-val" class="active-key">-</span>
             </div>
@@ -122,6 +129,12 @@
 
         // 核心邏輯：統一處理按鍵事件
         function handleKeyEvent(e, isDown) {
+            // [關鍵] 優先檢查是否為貼上/複製組合鍵，若是則絕對不攔截
+            if (e.ctrlKey && (e.key === 'v' || e.key === 'V' || e.key === 'c' || e.key === 'C')) {
+                console.log("Allowing system paste/copy");
+                return true; 
+            }
+
             if (!writer || e._handledByPico) return true; 
 
             // 1. 處理搖桿 (方向鍵、換頁鍵)
@@ -179,6 +192,48 @@
             }
             return true;
         });
+
+        // --- 模擬打字 (貼上) 邏輯 ---
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        const delaySlider = document.getElementById('paste-delay');
+        const delayDisplay = document.getElementById('delay-val');
+        
+        delaySlider.oninput = () => { delayDisplay.innerText = delaySlider.value; };
+
+        document.getElementById('btn-paste').onclick = async () => {
+            try {
+                const text = await navigator.clipboard.readText();
+                if (text) await simulateTyping(text);
+            } catch (e) { term.writeln('\r\n[ERROR] Clipboard access denied. Use Ctrl+V instead.'); }
+        };
+
+        async function simulateTyping(text) {
+            if (!writer) return;
+            const delay = parseInt(delaySlider.value);
+            term.writeln('\r\n[PASTE] Processing ' + text.length + ' characters...');
+            
+            for (let char of text) {
+                let charCode = char.charCodeAt(0);
+                // 處理換行
+                if (char === '\n' || char === '\r') charCode = 0x0D;
+
+                if (charCode > 0) {
+                    await sendProtocol('K', charCode, 1);
+                    await sleep(delay);
+                }
+            }
+            term.writeln('\r\n[PASTE] Completed.');
+        }
+
+        // 使用 document 監聽並增加捕獲階段 (true)
+        document.addEventListener('paste', async (e) => {
+            console.log("Paste event captured on document");
+            const text = (e.clipboardData || window.clipboardData).getData('text');
+            if (text) {
+                e.preventDefault();
+                await simulateTyping(text);
+            }
+        }, true);
     </script>
 </body>
 </html>
