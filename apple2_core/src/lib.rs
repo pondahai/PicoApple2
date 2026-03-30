@@ -196,4 +196,11 @@ pub extern "C" fn apple2_get_write_log(out_buffer: *mut u8) -> u16 {
 
 #[cfg(not(test))]
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! { loop {} }
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    // Trigger Cortex-M0+ System Reset (SYSRESETREQ)
+    unsafe {
+        let aircr = 0xE000ED0C as *mut u32;
+        core::ptr::write_volatile(aircr, 0x05FA0004);
+    }
+    loop {}
+}
