@@ -24,3 +24,31 @@
 
 ---
 *Note: This analysis serves as a foundational reference for why physical-layer protection requires either bitstream-level simulation (.woz) or logic-level cracking to function in a sector-based emulator.*
+
+## 🐛 Bug Fix: Core Hangs & Serial Terminal Unresponsiveness
+
+### 1. Diagnosis
+Users reported that the emulator would sporadically freeze entirely, taking the USB Serial terminal down with it. A full architectural review revealed two lethal issues in the dual-core design:
+
+*   **Fatal SD Card Race Condition**: In the RP2040 Arduino environment, the `SD.h` library (wrapping FatFS) is **not thread-safe**. 
+    *   **Core 0** routinely hits the SD card during emulation to load/flush virtual floppy tracks (`flushDirtyTrack`, `loadSingleTrack`).
+    *   **Core 1** was allowed to independently call SD functions when the user invoked the disk menu (e.g., `scanDiskFiles()`, `SD.open()`).
+    *   **Result**: When both cores hit the SPI1 bus simultaneously, the hardware driver locked up permanently, halting both cores.
+
+*   **Spinlock Deadlock via Rust Panic**: The `apple2_tick()` emulation loop executes inside a hardware spinlock (`res_lock`).
+    *   If the Rust core experienced a `panic!` (e.g., due to an array bounds violation), the `#![no_std]` panic handler was set to enter an infinite loop (`loop {}`).
+    *   **Result**: Core 0 halted *while still holding the lock*. Core 1 would then attempt to acquire the same lock to handle input or reset the system, causing a complete dual-core deadlock and severing USB Serial communication (handled by Core 0).
+
+### 2. Solutions Implemented
+We re-architected the cross-core communication for I/O and improved panic handling:
+
+1.  **I/O Command Queue (Thread Safety)**
+    *   Introduced a set of volatile flags (`req_scan_disks`, `req_load_disk_idx`, `req_reload_track0`) to act as a lock-free message passing system.
+    *   Core 1 now *never* calls SD library functions directly. Instead, it asserts a request flag and waits.
+    *   Core 0 reads these flags outside of its emulation tick and safely executes the SD operations. All SPI1 traffic is now perfectly serialized on Core 0.
+
+2.  **Cortex-M0+ Hard Reset on Panic**
+    *   Modified the Rust `panic_handler` in `apple2_core/src/lib.rs`.
+    *   Instead of `loop {}`, it now directly writes to the ARM Application Interrupt and Reset Control Register (AIRCR) to trigger a `SYSRESETREQ` (System Reset Request).
+    *   `core::ptr::write_volatile(0xE000ED0C as *mut u32, 0x05FA0004);`
+    *   This ensures that any fatal error forcibly reboots the Pico, automatically restoring the USB connection rather than silently bricking the device.
