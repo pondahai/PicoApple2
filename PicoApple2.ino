@@ -41,6 +41,7 @@ const uint16_t palette[16] = {
 };
 
 spin_lock_t *res_lock;
+spin_lock_t *fifo_lock;
 static uint16_t scanline_buffers[2][280];
 static uint8_t current_buf_idx = 0;
 
@@ -58,16 +59,32 @@ volatile bool ser_joy_up = false, ser_joy_down = false, ser_joy_left = false, se
 volatile bool ser_joy_btn0 = false, ser_joy_btn1 = false;
 
 void pushKey(uint8_t k) {
+  if (k == 0) return; 
+  uint32_t irq = spin_lock_blocking(fifo_lock);
   int next = (g_key_head + 1) % KEY_FIFO_SIZE;
   if (next != g_key_tail) { g_key_fifo[g_key_head] = k; g_key_head = next; }
+  spin_unlock(fifo_lock, irq);
 }
 uint8_t popKey() {
-  if (g_key_head == g_key_tail) return 0;
+  uint32_t irq = spin_lock_blocking(fifo_lock);
+  if (g_key_head == g_key_tail) { spin_unlock(fifo_lock, irq); return 0; }
   uint8_t k = g_key_fifo[g_key_tail];
   g_key_tail = (g_key_tail + 1) % KEY_FIFO_SIZE;
+  spin_unlock(fifo_lock, irq);
   return k;
 }
-uint8_t peekKey() { return (g_key_head == g_key_tail) ? 0 : g_key_fifo[g_key_tail]; }
+bool hasKey() {
+  uint32_t irq = spin_lock_blocking(fifo_lock);
+  bool h = (g_key_head != g_key_tail);
+  spin_unlock(fifo_lock, irq);
+  return h;
+}
+uint8_t peekKey() { 
+  uint32_t irq = spin_lock_blocking(fifo_lock);
+  uint8_t k = (g_key_head == g_key_tail) ? 0 : g_key_fifo[g_key_tail]; 
+  spin_unlock(fifo_lock, irq);
+  return k;
+}
 
 const char keymap_base[8][8] = {
   { '1', '3', '5', '7', '9', '-', 206, 204 }, { 'q', 'e', 't', 'u', 'o', '[', 207, '\\' },
@@ -203,6 +220,8 @@ void setup() {
   Serial.begin(115200); delay(2000);
   int lock_num = spin_lock_claim_unused(true);
   res_lock = spin_lock_init(lock_num);
+  int fifo_lock_num = spin_lock_claim_unused(true);
+  fifo_lock = spin_lock_init(fifo_lock_num);
   pinMode(PIN_JACK_SND, OUTPUT);
   uint32_t irq = spin_lock_blocking(res_lock);
   apple2_init();
@@ -217,6 +236,7 @@ void loop() {
 
   while (Serial.available() > 0) {
     uint8_t sK = Serial.read();
+    if (sK == 0) continue; // 過濾掉無效的 NULL 字元
     
     // 非阻塞協議解析 (0x02 開頭)
     if (proto_state > 0) {
@@ -305,11 +325,19 @@ void loop() {
   apple2_set_button(0, joy_btn0 || ser_joy_btn0);
   apple2_set_button(1, joy_btn1 || ser_joy_btn1);
   spin_unlock(res_lock, irq_joy);
-  if (peekKey() != 0) {
+  if (hasKey()) {
     uint32_t irq = spin_lock_blocking(res_lock);
-    if (apple2_is_ready_for_key()) { apple2_handle_key(popKey()); }
+    if (apple2_is_ready_for_key()) { 
+        uint8_t k = popKey();
+        apple2_handle_key(k); 
+    }
     spin_unlock(res_lock, irq);
   }
+
+  // 序列埠協議解析超時保護
+  static unsigned long last_proto_t = 0;
+  if (proto_state > 0 && millis() - last_proto_t > 500) { proto_state = 0; }
+  if (proto_state > 0) last_proto_t = millis();
   unsigned long start_t = micros();
   static bool last_motor_on = false;
   uint32_t irq_t = spin_lock_blocking(res_lock);
@@ -439,6 +467,22 @@ void loop1() {
     for (int col = 0; col < 8; col++) keyState[row][7 - col] = (colData & (1 << col));
   }
   fastWrite(CLOCK_PIN, 1); delayMicroseconds(2); fastWrite(CLOCK_PIN, 0);
+
+  // --- 融合矩陣鍵盤到搖桿邏輯 ---
+  bool mat_joy_up    = keyState[5][6]; // 209
+  bool mat_joy_down  = keyState[3][6]; // 210
+  bool mat_joy_left  = keyState[7][6]; // 211
+  bool mat_joy_right = keyState[6][6]; // 212
+  bool mat_joy_btn0  = keyState[7][4]; // 213 (PgUp / Open Apple)
+  bool mat_joy_btn1  = keyState[6][7]; // 214 (PgDown / Closed Apple)
+
+  joy_up = (digitalRead(BTN_UP) == LOW) || mat_joy_up;
+  joy_down = (digitalRead(BTN_DOWN) == LOW) || mat_joy_down;
+  joy_left = (digitalRead(BTN_LEFT) == LOW) || mat_joy_left;
+  joy_right = (digitalRead(BTN_RIGHT) == LOW) || mat_joy_right;
+  joy_btn0 = (digitalRead(BTN_A) == LOW) || mat_joy_btn0;
+  joy_btn1 = (digitalRead(BTN_B) == LOW) || mat_joy_btn1;
+
   for (int r = 0; r < 8; r++) {
     for (int c = 0; c < 8; c++) {
       bool p = keyState[r][c];
@@ -446,12 +490,35 @@ void loop1() {
         lastKeyTime[r][c] = now; lastKeyState[r][c] = p;
         if (r == 3 && c == 7) { isFnPressed = p; continue; }
         if (p) {
-          if (isFnPressed && keymap_base[r][c] == '1') g_f_key_event = 1;
-          else if (isFnPressed && keymap_base[r][c] == '2') g_f_key_event = 2;
-          else if (isFnPressed && keymap_base[r][c] == '3') g_f_key_event = 3;
-          else if (!g_show_menu) pushKey(keymap_base[r][c]);
+          uint8_t k = (uint8_t)keymap_base[r][c];
+          Serial.printf("KBD: Row %d, Col %d, Val %d ('%c')\n", r, c, k, (k >= 32 && k < 127) ? (char)k : '?');
+          if (isFnPressed && k == '1') g_f_key_event = 1;
+          else if (isFnPressed && k == '2') g_f_key_event = 2;
+          else if (isFnPressed && k == '3') g_f_key_event = 3;
           else {
-            if (keymap_base[r][c] == (char)209) g_menu_cmd = 1; else if (keymap_base[r][c] == (char)210) g_menu_cmd = 2; else if (keymap_base[r][c] == (char)203) g_menu_cmd = 3;
+            // --- 矩陣鍵盤轉換層 (基於用戶測試數據) ---
+            bool is_control = true;
+            if (k == 209) k = 0x0B;      // Up
+            else if (k == 210) k = 0x0A; // Down
+            else if (k == 211) k = 0x08; // Left
+            else if (k == 212) k = 0x15; // Right
+            else if (k == 203) k = 0x0D; // Enter
+            else if (k == 207) k = 0x1B; // Esc
+            else if (k == 213 || k == 214) { is_control = false; k = 0; } // PgUp/Dn 僅作搖桿
+            else { 
+              is_control = false; 
+              if (k >= 'a' && k <= 'z') k -= 32; // 轉大寫
+            }
+
+            if (k > 0) {
+              if (!g_show_menu) pushKey(k);
+              else {
+                if (k == 0x0B) g_menu_cmd = 1; // Up
+                else if (k == 0x0A) g_menu_cmd = 2; // Down
+                else if (k == 0x0D) g_menu_cmd = 3; // Select
+                else if (k == 0x1B) g_menu_cmd = 4; // Back
+              }
+            }
           }
         }
       }
