@@ -97,6 +97,13 @@ const char keymap_base[8][8] = {
   { 'x', 'f', 'h', 'k', ';', 203, 212, '=' }, { 's', 'v', 'n', ',', 213, ' ', 211, 0 }
 };
 
+const char keymap_shift[8][8] = {
+  { '!', '#', '%', '&', '(', '_', 206, 204 }, { 'Q', 'E', 'T', 'U', 'O', '{', 207, '|' },
+  { 'A', 'D', 'G', 'J', 'L', '"', 205, 208 }, { 'Z', 'C', 'B', 'M', '>', 202, 210, 0 },
+  { '@', '$', '^', '*', ')', 214, '~', 0 }, { 'W', 'R', 'Y', 'I', 'P', '}', 209, '?' },
+  { 'X', 'F', 'H', 'K', ':', 203, 212, '+' }, { 'S', 'V', 'N', '<', 213, ' ', 211, 0 }
+};
+
 extern "C" {
   void apple2_init();
   uint32_t apple2_tick();
@@ -140,6 +147,7 @@ uint8_t keyState[8][8] = {0};
 uint8_t lastKeyState[8][8] = {0};
 unsigned long lastKeyTime[8][8] = {0};
 bool isFnPressed = false;
+bool g_caps_lock = true;
 
 inline void fastWrite(uint pin, bool val) { gpio_put(pin, val); }
 inline bool fastRead(uint pin) { return gpio_get(pin); }
@@ -454,13 +462,13 @@ void drawString(uint16_t x, uint16_t y, String s, uint16_t color, uint16_t bg) {
 }
 
 void drawDiskMenu() {
-  tft_dma.fillScreen(0x7BEF); tft_dma.drawRect(10, 10, 300, 220, 0xFFFF);
-  drawString(30, 30, "SELECT DISK IMAGE:", 0xFFE0, 0x7BEF);
+  tft_dma.fillScreen(0x0000); tft_dma.drawRect(10, 10, 300, 220, 0xFFFF);
+  drawString(30, 30, "SELECT DISK IMAGE:", 0xFFE0, 0x0000);
   tft_dma.drawRect(10, 50, 300, 2, 0xFFFF);
   for (int i = 0; i < disk_file_count; i++) {
     uint16_t y = 65 + (i * 12);
     if (i == selected_file_idx) { tft_dma.drawRect(25, y-2, 270, 12, 0x07E0); drawString(30, y, "> " + disk_files[i], 0x0000, 0x07E0); }
-    else { drawString(30, y, "  " + disk_files[i], 0xFFFF, 0x7BEF); }
+    else { drawString(30, y, "  " + disk_files[i], 0xFFFF, 0x0000); }
   }
 }
 
@@ -525,31 +533,41 @@ void loop1() {
   joy_btn0 = (digitalRead(BTN_A) == LOW) || mat_joy_btn0;
   joy_btn1 = (digitalRead(BTN_B) == LOW) || mat_joy_btn1;
 
+  bool isShiftPressed = keyState[3][5];
+  bool isCtrlPressed  = keyState[2][6];
+
   for (int r = 0; r < 8; r++) {
     for (int c = 0; c < 8; c++) {
       bool p = keyState[r][c];
       if (p != lastKeyState[r][c] && (now - lastKeyTime[r][c] > 30)) {
         lastKeyTime[r][c] = now; lastKeyState[r][c] = p;
         if (r == 3 && c == 7) { isFnPressed = p; continue; }
+        if (r == 3 && c == 5) continue; // Shift
+        if (r == 2 && c == 6) continue; // Ctrl
+        
         if (p) {
-          uint8_t k = (uint8_t)keymap_base[r][c];
+          uint8_t k = isShiftPressed ? (uint8_t)keymap_shift[r][c] : (uint8_t)keymap_base[r][c];
           Serial.printf("KBD: Row %d, Col %d, Val %d ('%c')\n", r, c, k, (k >= 32 && k < 127) ? (char)k : '?');
+          
           if (isFnPressed && k == '1') g_f_key_event = 1;
-          else if (isFnPressed && k == '2') g_f_key_event = 2;
-          else if (isFnPressed && k == '3') g_f_key_event = 3;
+          else if (isFnPressed && (k == '2' || k == '@')) g_f_key_event = 2;
+          else if (isFnPressed && (k == '3' || k == '#')) g_f_key_event = 3;
+          else if (isFnPressed && (k == 'c' || k == 'C')) {
+              g_caps_lock = !g_caps_lock;
+              Serial.printf("SYSTEM: Caps Lock %s\n", g_caps_lock ? "ON" : "OFF");
+          }
           else {
-            // --- 矩陣鍵盤轉換層 (基於用戶測試數據) ---
-            bool is_control = true;
-            if (k == 209) k = 0; // Handled by joystick logic above
-            else if (k == 210) k = 0; 
-            else if (k == 211) k = 0; 
-            else if (k == 212) k = 0; 
+            // --- 矩陣鍵盤轉換層 ---
+            if (k == 209 || k == 210 || k == 211 || k == 212 || k == 213 || k == 214) k = 0; // Handled by joystick
             else if (k == 203) k = 0x0D; // Enter
             else if (k == 207) k = 0x1B; // Esc
-            else if (k == 213 || k == 214) { is_control = false; k = 0; } // PgUp/Dn 僅作搖桿
-            else { 
-              is_control = false; 
-              if (k >= 'a' && k <= 'z') k -= 32; // 轉大寫
+            else if (isCtrlPressed) {
+                if (k >= 'a' && k <= 'z') k = (k - 32) & 0x1F;
+                else if (k >= '@' && k <= '_') k = k & 0x1F;
+                else k = 0; 
+            } else {
+                if (g_caps_lock && !isShiftPressed && k >= 'a' && k <= 'z') k -= 32;
+                else if (g_caps_lock && isShiftPressed && k >= 'A' && k <= 'Z') k += 32;
             }
 
             if (k > 0) {
@@ -579,8 +597,8 @@ void loop1() {
     req_scan_disks = true; 
     ack_scan_disks = false; 
     g_show_menu = true; 
-    tft_dma.fillScreen(0x7BEF); 
-    drawString(30, 30, "SCANNING SD...", 0xFFFF, 0x7BEF);
+    tft_dma.fillScreen(0x0000); 
+    drawString(30, 30, "SCANNING SD...", 0xFFFF, 0x0000);
   }
   if (g_show_menu) {
     if (req_scan_disks) {
@@ -588,7 +606,7 @@ void loop1() {
             req_scan_disks = false;
             selected_file_idx = 0;
             if (disk_file_count > 0) drawDiskMenu();
-            else { drawString(30, 50, "NO DSK FILES FOUND", 0xF800, 0x7BEF); }
+            else { drawString(30, 50, "NO DSK FILES FOUND", 0xF800, 0x0000); }
         }
         return;
     }
