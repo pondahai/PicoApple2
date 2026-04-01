@@ -60,10 +60,14 @@ volatile bool ser_joy_btn0 = false, ser_joy_btn1 = false;
 
 void pushKey(uint8_t k) {
   if (k == 0) return; 
+  // Bypass buffer for testing:
+  apple2_handle_key(k);
+  /*
   uint32_t irq = spin_lock_blocking(fifo_lock);
   int next = (g_key_head + 1) % KEY_FIFO_SIZE;
   if (next != g_key_tail) { g_key_fifo[g_key_head] = k; g_key_head = next; }
   spin_unlock(fifo_lock, irq);
+  */
 }
 uint8_t popKey() {
   uint32_t irq = spin_lock_blocking(fifo_lock);
@@ -89,8 +93,8 @@ uint8_t peekKey() {
 const char keymap_base[8][8] = {
   { '1', '3', '5', '7', '9', '-', 206, 204 }, { 'q', 'e', 't', 'u', 'o', '[', 207, '\\' },
   { 'a', 'd', 'g', 'j', 'l', '\'', 205, 208 }, { 'z', 'c', 'b', 'm', '.', 202, 210, 0 },
-  { '2', '4', '6', '8', '0', '=', '`', 0 }, { 'w', 'r', 'y', 'i', 'p', ']', 209, '/' },
-  { 'x', 'f', 'h', 'k', ';', 203, 212, 214 }, { 's', 'v', 'n', ',', 213, ' ', 211, 0 }
+  { '2', '4', '6', '8', '0', 214, '`', 0 }, { 'w', 'r', 'y', 'i', 'p', ']', 209, '/' },
+  { 'x', 'f', 'h', 'k', ';', 203, 212, '=' }, { 's', 'v', 'n', ',', 213, ' ', 211, 0 }
 };
 
 extern "C" {
