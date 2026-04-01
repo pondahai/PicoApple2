@@ -366,7 +366,7 @@ void setup1() {
   gpio_init(LATCH_PIN); gpio_set_dir(LATCH_PIN, GPIO_OUT);
   gpio_init(CLOCK_PIN); gpio_set_dir(CLOCK_PIN, GPIO_OUT);
   gpio_init(DATA_IN_PIN); gpio_set_dir(DATA_IN_PIN, GPIO_IN);
-  pinMode(PIN_DISPLAY_BL, OUTPUT); digitalWrite(PIN_DISPLAY_BL, HIGH);
+  pinMode(PIN_DISPLAY_BL, OUTPUT); digitalWrite(PIN_DISPLAY_BL, LOW);
   tft_dma.begin();
   gpio_put(PIN_DISPLAY_RST, 0); delay(100); gpio_put(PIN_DISPLAY_RST, 1); delay(100);
   tft_dma.writeCommand(0x01); delay(150);
@@ -388,6 +388,7 @@ void setup1() {
   tft_dma.writeCommand(0x29); delay(150);
   spi_set_baudrate(spi0, 30000000);
   tft_dma.fillScreen(palette[0]);
+  digitalWrite(PIN_DISPLAY_BL, HIGH);
   pinMode(BTN_UP, INPUT_PULLUP); pinMode(BTN_DOWN, INPUT_PULLUP);
   pinMode(BTN_LEFT, INPUT_PULLUP); pinMode(BTN_RIGHT, INPUT_PULLUP);
   pinMode(BTN_A, INPUT_PULLUP); pinMode(BTN_B, INPUT_PULLUP);
