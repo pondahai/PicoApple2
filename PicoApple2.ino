@@ -237,7 +237,6 @@ void loop() {
 
   while (Serial.available() > 0) {
     uint8_t sK = Serial.read();
-    if (sK == 0) continue; // 過濾掉無效的 NULL 字元
     
     // 非阻塞協議解析 (0x02 開頭)
     if (proto_state > 0) {
@@ -261,6 +260,8 @@ void loop() {
       }
       continue;
     }
+
+    if (sK == 0) continue; // 過濾掉一般終端機的無效 NULL 字元
 
     if (esc_state == 0) {
       if (sK == 0x02) { proto_state = 1; }
