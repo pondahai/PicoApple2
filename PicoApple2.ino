@@ -233,6 +233,7 @@ void loop() {
   static int esc_idx = 0;
   static int proto_state = 0;
   static uint8_t proto_cmd[3];
+  static unsigned long last_ansi_joy_t = 0;
 
   while (Serial.available() > 0) {
     uint8_t sK = Serial.read();
@@ -270,7 +271,13 @@ void loop() {
         else if (sK == '\r') sK = 0x0D; 
         else if (sK == '\n') { if (last_raw_sk == '\r') { last_raw_sk = sK; continue; } sK = 0x0D; }
         else if (sK >= 'a' && sK <= 'z') sK -= 32; 
-        pushKey(sK); 
+        
+        if (g_show_menu) {
+          if (sK == 0x0D) g_menu_cmd = 3;
+          else if (sK == 0x1B) g_menu_cmd = 4;
+        } else {
+          pushKey(sK); 
+        }
         last_raw_sk = sK;
       }
     } else if (esc_state == 1) {
@@ -280,8 +287,12 @@ void loop() {
       if (esc_idx < 7) { esc_buf[esc_idx++] = sK; esc_buf[esc_idx] = 0; }
       if ((sK >= 'A' && sK <= 'Z') || sK == '~') {
         if (esc_buf[0] == '[') {
-          if (sK == 'A') { if (g_show_menu) g_menu_cmd = 1; else ser_joy_up = true; }
-          else if (sK == 'B') { if (g_show_menu) g_menu_cmd = 2; else ser_joy_down = true; }
+          if (sK == 'A') { if (g_show_menu) g_menu_cmd = 1; else { ser_joy_up = true; last_ansi_joy_t = millis(); } }
+          else if (sK == 'B') { if (g_show_menu) g_menu_cmd = 2; else { ser_joy_down = true; last_ansi_joy_t = millis(); } }
+          else if (sK == 'C') { if (!g_show_menu) { ser_joy_right = true; last_ansi_joy_t = millis(); } }
+          else if (sK == 'D') { if (!g_show_menu) { ser_joy_left = true; last_ansi_joy_t = millis(); } }
+          else if (strcmp(esc_buf, "[5~") == 0) { if (!g_show_menu) { ser_joy_btn0 = true; last_ansi_joy_t = millis(); } }
+          else if (strcmp(esc_buf, "[6~") == 0) { if (!g_show_menu) { ser_joy_btn1 = true; last_ansi_joy_t = millis(); } }
           else if (strcmp(esc_buf, "[11~") == 0 || strcmp(esc_buf, "OP") == 0) g_f_key_event = 1;
           else if (strcmp(esc_buf, "[12~") == 0 || strcmp(esc_buf, "OQ") == 0) g_f_key_event = 2;
           else if (strcmp(esc_buf, "[13~") == 0 || strcmp(esc_buf, "OR") == 0) g_f_key_event = 3;
@@ -291,6 +302,13 @@ void loop() {
         esc_state = 0;
       }
     }
+  }
+
+  if (last_ansi_joy_t > 0 && (millis() - last_ansi_joy_t > 150)) {
+    ser_joy_up = false; ser_joy_down = false; 
+    ser_joy_left = false; ser_joy_right = false;
+    ser_joy_btn0 = false; ser_joy_btn1 = false;
+    last_ansi_joy_t = 0;
   }
 
   if (!g_boot_ready) { yield(); return; }
@@ -470,12 +488,30 @@ void loop1() {
   fastWrite(CLOCK_PIN, 1); delayMicroseconds(2); fastWrite(CLOCK_PIN, 0);
 
   // --- 融合矩陣鍵盤到搖桿邏輯 ---
-  bool mat_joy_up    = keyState[5][6]; // 209
-  bool mat_joy_down  = keyState[3][6]; // 210
-  bool mat_joy_left  = keyState[7][6]; // 211
-  bool mat_joy_right = keyState[6][6]; // 212
-  bool mat_joy_btn0  = keyState[7][4]; // 213 (PgUp / Open Apple)
-  bool mat_joy_btn1  = keyState[6][7]; // 214 (PgDown / Closed Apple)
+  // The Apple2Keyboard sends keys using the matrix. The keys map to values in keymap_base.
+  // 209: Up, 210: Down, 211: Left, 212: Right
+  // 213: PgUp (Btn0), 214: PgDown (Btn1)
+  
+  bool mat_joy_up    = false;
+  bool mat_joy_down  = false;
+  bool mat_joy_left  = false;
+  bool mat_joy_right = false;
+  bool mat_joy_btn0  = false;
+  bool mat_joy_btn1  = false;
+
+  for (int r = 0; r < 8; r++) {
+    for (int c = 0; c < 8; c++) {
+      if (keyState[r][c]) {
+        uint8_t k = (uint8_t)keymap_base[r][c];
+        if (k == 209) mat_joy_up = true;
+        if (k == 210) mat_joy_down = true;
+        if (k == 211) mat_joy_left = true;
+        if (k == 212) mat_joy_right = true;
+        if (k == 213) mat_joy_btn0 = true;
+        if (k == 214) mat_joy_btn1 = true;
+      }
+    }
+  }
 
   joy_up = (digitalRead(BTN_UP) == LOW) || mat_joy_up;
   joy_down = (digitalRead(BTN_DOWN) == LOW) || mat_joy_down;
@@ -499,10 +535,10 @@ void loop1() {
           else {
             // --- 矩陣鍵盤轉換層 (基於用戶測試數據) ---
             bool is_control = true;
-            if (k == 209) k = 0x0B;      // Up
-            else if (k == 210) k = 0x0A; // Down
-            else if (k == 211) k = 0x08; // Left
-            else if (k == 212) k = 0x15; // Right
+            if (k == 209) k = 0; // Handled by joystick logic above
+            else if (k == 210) k = 0; 
+            else if (k == 211) k = 0; 
+            else if (k == 212) k = 0; 
             else if (k == 203) k = 0x0D; // Enter
             else if (k == 207) k = 0x1B; // Esc
             else if (k == 213 || k == 214) { is_control = false; k = 0; } // PgUp/Dn 僅作搖桿
@@ -514,9 +550,7 @@ void loop1() {
             if (k > 0) {
               if (!g_show_menu) pushKey(k);
               else {
-                if (k == 0x0B) g_menu_cmd = 1; // Up
-                else if (k == 0x0A) g_menu_cmd = 2; // Down
-                else if (k == 0x0D) g_menu_cmd = 3; // Select
+                if (k == 0x0D) g_menu_cmd = 3; // Select
                 else if (k == 0x1B) g_menu_cmd = 4; // Back
               }
             }
@@ -555,17 +589,19 @@ void loop1() {
     }
     static uint32_t last_m_nav = 0;
     bool b_u = joy_up || (g_menu_cmd == 1); bool b_d = joy_down || (g_menu_cmd == 2); bool b_e = joy_btn0 || (g_menu_cmd == 3); bool b_q = joy_btn1 || (g_menu_cmd == 4);
-    if (millis() - last_m_nav > 200) {
-      if (disk_file_count > 0) {
-        if (b_u) { selected_file_idx = (selected_file_idx - 1 + disk_file_count) % disk_file_count; drawDiskMenu(); last_m_nav = millis(); }
-        else if (b_d) { selected_file_idx = (selected_file_idx + 1) % disk_file_count; drawDiskMenu(); last_m_nav = millis(); }
-        else if (b_e) {
-          req_load_disk_idx = selected_file_idx; // 交給 Core 0 處理
-          g_show_menu = false; tft_dma.fillScreen(0); last_m_nav = millis();
+    if (b_u || b_d || b_e || b_q) {
+      if (millis() - last_m_nav > 200) {
+        if (disk_file_count > 0) {
+          if (b_u) { selected_file_idx = (selected_file_idx - 1 + disk_file_count) % disk_file_count; drawDiskMenu(); last_m_nav = millis(); }
+          else if (b_d) { selected_file_idx = (selected_file_idx + 1) % disk_file_count; drawDiskMenu(); last_m_nav = millis(); }
+          else if (b_e) {
+            req_load_disk_idx = selected_file_idx; // 交給 Core 0 處理
+            g_show_menu = false; tft_dma.fillScreen(0); last_m_nav = millis();
+          }
         }
+        if (b_q) { g_show_menu = false; g_emu_paused = false; tft_dma.fillScreen(0); last_m_nav = millis(); }
+        g_menu_cmd = 0;
       }
-      if (b_q) { g_show_menu = false; g_emu_paused = false; tft_dma.fillScreen(0); last_m_nav = millis(); }
-      g_menu_cmd = 0;
     }
     return;
   }
