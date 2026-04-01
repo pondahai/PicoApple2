@@ -462,9 +462,15 @@ void drawString(uint16_t x, uint16_t y, String s, uint16_t color, uint16_t bg) {
 }
 
 void drawDiskMenu() {
-  tft_dma.fillScreen(0x0000); tft_dma.drawRect(10, 10, 300, 220, 0xFFFF);
+  tft_dma.fillScreen(0x0000); 
+  // Draw a white outline manually since drawRect fills the area
+  tft_dma.drawRect(10, 10, 300, 2, 0xFFFF); // Top
+  tft_dma.drawRect(10, 228, 300, 2, 0xFFFF); // Bottom
+  tft_dma.drawRect(10, 10, 2, 220, 0xFFFF); // Left
+  tft_dma.drawRect(308, 10, 2, 220, 0xFFFF); // Right
+  
   drawString(30, 30, "SELECT DISK IMAGE:", 0xFFE0, 0x0000);
-  tft_dma.drawRect(10, 50, 300, 2, 0xFFFF);
+  tft_dma.drawRect(10, 50, 300, 2, 0xFFFF); // Separator
   for (int i = 0; i < disk_file_count; i++) {
     uint16_t y = 65 + (i * 12);
     if (i == selected_file_idx) { tft_dma.drawRect(25, y-2, 270, 12, 0x07E0); drawString(30, y, "> " + disk_files[i], 0x0000, 0x07E0); }
