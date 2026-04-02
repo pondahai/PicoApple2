@@ -388,6 +388,9 @@ void loop() {
     unsigned long expected = (unsigned long)((float)cycles / 1.023f);
     unsigned long actual = micros() - start_t;
     if (actual < expected) delayMicroseconds(expected - actual);
+  } else {
+    // 馬達全速運轉時，主動讓出極短的時間，避免霸佔 res_lock 導致 Core 1 畫面卡頓
+    yield();
   }
 }
 

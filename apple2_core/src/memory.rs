@@ -62,13 +62,15 @@ impl Apple2Memory {
     pub fn begin_cpu_step(&mut self, cycle_base: u64) { self.cpu_step_cycle_base = cycle_base; self.cpu_step_cycle_cursor = 0; self.cpu_step_audio_active = true; }
     pub fn end_cpu_step(&mut self) { self.cpu_step_audio_active = false; }
     pub fn finalize_cpu_step_cycles(&mut self, total_cycles: u32) {
-        let rem = total_cycles - self.cpu_step_cycle_cursor.min(total_cycles);
-        if rem > 0 { self.disk2.tick(rem); self.cpu_step_cycle_cursor = total_cycles; }
+        // 一次性打包結算整條指令的週期給磁碟
+        self.disk2.tick(total_cycles);
+        self.cpu_step_cycle_cursor = total_cycles;
         self.disk2_motor_on = self.disk2.motor_on;
     }
 
     fn record_bus_access(&mut self) {
-        if self.cpu_step_audio_active { self.cpu_step_cycle_cursor = self.cpu_step_cycle_cursor.saturating_add(1); self.disk2.tick(1); }
+        // 移除頻繁的 disk2.tick(1) 呼叫，僅保留週期計數供 paddle 使用
+        if self.cpu_step_audio_active { self.cpu_step_cycle_cursor = self.cpu_step_cycle_cursor.saturating_add(1); }
     }
 }
 
