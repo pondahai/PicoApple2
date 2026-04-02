@@ -67,9 +67,13 @@ pub extern "C" fn apple2_tick() -> u32 {
     unsafe {
         let mut total_cycles = 0;
         if let Some(ref mut m) = *addr_of_mut!(MACHINE) {
-            // 調整為 200 條指令，在磁碟同步精度與 FFI 切換開銷之間取得平衡
-            // 既能保持馬達轉動時的 Turbo 加速感，也能確保寫入穩定
-            for _ in 0..200 { total_cycles += m.step(); }
+            // 增加為 1000 條指令以極大化吞吐量，並加入早退機制防止磁軌失步
+            for _ in 0..1000 {
+                total_cycles += m.step();
+                if m.mem.disk2.needs_reload {
+                    break;
+                }
+            }
         }
         total_cycles
     }
