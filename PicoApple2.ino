@@ -420,7 +420,7 @@ void setup1() {
   tft_dma.writeCommand(0xB6); tft_dma.writeData(0x08); tft_dma.writeData(0x82); tft_dma.writeData(0x27);
   tft_dma.writeCommand(0x11); delay(150);
   tft_dma.writeCommand(0x29); delay(150);
-  spi_set_baudrate(spi0, 30000000);
+  spi_set_baudrate(spi0, 62500000);
   tft_dma.fillScreen(palette[0]);
   digitalWrite(PIN_DISPLAY_BL, HIGH);
   pinMode(BTN_UP, INPUT_PULLUP); pinMode(BTN_DOWN, INPUT_PULLUP);
@@ -429,12 +429,11 @@ void setup1() {
   pinMode(BTN_MENU, INPUT_PULLUP); pinMode(BTN_ALT, INPUT_PULLUP);
   SPI1.setRX(SD_MISO); SPI1.setTX(SD_MOSI); SPI1.setSCK(SD_SCK);
   bool sd_ok = false;
-  Serial.print("SD: Initializing SPI1 (10MHz)... ");
-  // 降低頻率至 10MHz 以提高杜邦線連接的穩定性
+  Serial.print("SD: Initializing SPI1 (20MHz)... ");
+  // 恢復高速頻率至 20MHz
   // RP2040 參數順序為 (csPin, frequency, spi)
-  for (int i = 0; i < 5; i++) { 
-    if (SD.begin(SD_CS, 10000000, SPI1)) { 
-      sd_ok = true; 
+  for (int i = 0; i < 5; i++) {
+    if (SD.begin(SD_CS, 20000000, SPI1)) {      sd_ok = true; 
       Serial.println("OK!");
       break; 
     } 

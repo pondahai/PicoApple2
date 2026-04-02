@@ -1,5 +1,18 @@
 # Pico Apple II Emulator - Development Log
 
+## 2026-04-02: SPI Performance Optimization (High Speed Restoration)
+
+### 1. SPI 頻率提升
+*   **背景**: 之前為了穩定性（特別是長杜邦線連接）將 SPI 頻率降低。在確認硬體接線穩定後，今天執行了高速恢復。
+*   **優化內容**:
+    *   **TFT (SPI0)**: 從 30MHz 提升至 **62.5MHz**。這在 250MHz 超頻下對應 `clk_sys / 4`，顯著降低了 Core 1 在 `waitTransferDone()` 上的等待時間，提升了渲染吞吐量。
+    *   **SD (SPI1)**: 從 10MHz 恢復至 **20MHz**。加快了磁軌載入與 `flushDirtyTrack()` 的寫回速度。
+*   **成果**: 
+    *   Core 1 的渲染循環現在更加流暢，為未來的視訊效果留出了更多餘裕。
+    *   磁碟讀寫延遲感降低。
+
+---
+
 ## 專案目標
 將以 Rust 撰寫的 Apple II 模擬器核心 ([apple2emu](https://github.com/pondahai/apple2emu.git)) 移植到 Raspberry Pi Pico (RP2040) 上，使用 C++ (Arduino 框架) 負責硬體 I/O 與雙核排程。
 
@@ -18,7 +31,7 @@
 *   **優化**: 實作 `serial_monitor.ps1` 雙向通訊，捕捉電腦端鍵盤輸入並傳送至 Pico。
 *   **技術**: 
     *   **ANSI 轉義序列解析**: 在 Core 0 實作狀態機，解析 `ESC [A` (上) 等序列，映射至模擬器方向鍵與 F1-F4。
-    *   **按鍵捕捉偵錯模式 (Monitor Mode)**: 按下 `Ctrl+K` 進入偵錯模式，Pico 會即時回傳接收到的 Hex 碼，用於校準不同終端機的按鍵映射。
+    *   **按鍵捕捉偵錯模式 (Monitor Mode)**: 按下 `Ctrl+K` 進入偵診模式，Pico 會即時回傳接收到的 Hex 碼，用於校準不同終端機的按鍵映射。
 *   **成果**: 開發者可完全透過電腦終端機操作模擬器（包含磁碟選單），無需實體鍵盤硬體。
 
 ### 4. 專業虛擬控制台 (WebSerial Pro Console) (2026-03-26)
@@ -98,35 +111,12 @@
 ## 模擬器控制熱鍵 (Fn Mapping)
 | 熱鍵 | 功能 | 說明 |
 | :--- | :--- | :--- |
-| **Fn + 1** | Warm Reset | 觸發 Ctrl-Reset |
-| **Fn + 2** | Cold Reset | 模擬冷啟動 (觸發磁碟重新引導) |
-| **Fn + 3** | Disk Menu | 開啟 F3 檔案選擇選單 |
+| **Fn + 1** | Warm Reset (F1) | Ctrl-Reset 效果，不重載磁碟。 |
+| **Fn + 2** | Cold Reset (F2) | 強制重啟並從磁軌 0 重新開機。 |
+| **Fn + 3** | Disk Menu (F3) | 開啟 SD 卡 DSK 檔案選擇選單。 |
+| **Fn + C** | Caps Lock | 切換大小寫鎖定（預設為 ON）。 |
 
 ---
-
-## 磁碟模擬：硬體本質優先診斷計畫 (2026-03-26)
-
-在針對 `goonies.dsk` 讀取失敗與 `INIT HELLO` 寫入錯誤進行討論後，確立了以下開發共識，將模擬邏輯從「軟體補償」回歸至「硬體電路本質」：
-
-### 1. 硬體邏輯絕對性 (Hardware as the Absolute Truth)
-*   **核心觀點**: Disk II 控制器的 PROM 狀態定序器、移位寄存器與 Q6/Q7 狀態位元是固定電路邏輯。
-*   **診斷準則**: 不應使用「猜測」或「經驗值」來修補時序。若讀寫失敗，必是模擬邏輯與 Wozniak 原廠 PROM 狀態轉移表（State Table）存在偏差。
-
-### 2. `.dsk` 格式無缺陷論 (Data Integrity)
-*   **核心觀點**: `.dsk` 檔案是 100% 的純資料。所謂的格式缺陷或時序問題，本質上是模擬器在「資料 $\leftrightarrow$ 物理位元流」轉換過程中的硬體邏輯模擬不夠精確。
-*   **目標**: 只要硬體模擬還原度達到 100%，標準 `.dsk` 資料的讀寫自然會成功。
-
-### 3. 物理特性源於底層機制 (Physics from Principles)
-*   **半軌 (Half-track)**: 不應在軟體層面寫死，應源於步進馬達四組線圈 (Phase 0-3) 通電後的物理合力模擬。磁頭位置的連續性變化應是硬體模擬的自然產物。
-*   **同步與相位**: 32 個 CPU 週期處理 1 個位元是物理常數。失敗源於狀態機切換與指令週期之間的「相位偏移 (Phase Shift)」。
-
-### 4. 近期修復路徑
-*   **Goonies (Disk Read)**: 審計 `apple2_core/src/disk2.rs`，對照 Disk II PROM 邏輯，檢查位元移位與同步位元判定。
-*   **INIT HELLO (Disk Write)**: 檢查寫入模式下的狀態更新原子性（Atomicity），確保馬達相位切換與暫存器響應無延遲。
-
----
-
-## 2026-03-28: System Stability & Reset Refactor
 
 ### 當前進展
 1.  **啟動同步與死鎖修復**:
@@ -140,62 +130,3 @@
     *   在 `scanDiskFiles` 中加入了 Serial 偵錯輸出，能即時回報磁碟掃描狀態。
 4.  **GPIO 按鍵響應優化**:
     *   將 GPIO 讀取移出受限的渲染循環，現在按鍵掃描頻率不再受 40ms 幀率限制，解決了「按鍵沒反應」的體感問題。
-
-### 🚨 Goonies 磁碟當機事件 (Critical Discovery)
-*   **現象**: 載入 `goonies.dsk` 後，模擬器立即進入當機狀態，Serial 輸出中斷，且連實體 MENU 鍵與選單系統都無法喚醒。
-*   **診斷**: 由於目前使用的是位元組級（32-cycle）核心，當磁碟映像包含非標準 Sync 位元或損毀的 Nibbles 時，核心可能陷入無窮搜尋循環或觸發非預期的 FFI 記憶體衝突。
-*   **暫時對策**: 換回標準 `MASTER.DSK` 後系統恢復正常。這確認了問題不在硬體而在特定 DSK 的處理邏輯。
-
----
-
-## 2026-03-28: 磁碟寫入時序大突破 (The Err:00AA Breakthrough)
-
-### 🚨 終極 Bug：幽靈字節與跳號事件
-*   **現象**: `SAVE` 功能觸發後，雖然資料成功在 CPU 執行了寫入迴圈，但 `denibblize_track` 卻屢屢報錯，起初猜測是漏解了扇區。
-*   **追蹤工具**: 實作了 C++ 與 Rust 的雙重聯合除錯機制。
-    *   **進階 1**: 將 `apple2_get_denibblize_error()` 從單純回傳錯誤代碼，升級為 `((k << 16) | byte_val)`，精準定位出錯在哪一個位元組 (k)。
-    *   **進階 2**: 實作硬體級 `WRITE_LOG`，強制側錄 CPU 對 `$C08D` 暫存器的每一次寫入。
-*   **發現**:
-    *   `Err:00AA` 揭露了最關鍵的一環：在資料檔頭 `D5 AA AD` 之後，陣列中緊接著的下一顆 (k=0) 竟然是上一輪遺留的垃圾 `0xAA`！
-    *   `WRITE_LOG` 證明 CPU 確實完美地寫出了 `[D5] [AA] [AD] [AE] [B2] ...`，**完全沒有 `0xAA`**。
-*   **根本原因 (Root Cause)**:
-    *   Apple II DOS 3.3 的寫入組合語言中，在每次 `STA $C08D` (驅動 Q6=1 以推入 Byte) 之後，會緊接著執行 `ORA $C08C` 使得 **Q6 短暫變為 0**。
-    *   在原先的 `disk2.rs::tick()` 條件中：`if self.q7 && self.q6`。因為 Q6 暫時變 0 了，定時器被錯誤授權執行了 `else` 中的「推進位移」：`byte_index += 1`。
-    *   這導致 CPU 每送一顆 Byte，背後的陣列指標就硬生生地**跳過了一格**，將連貫的連續寫入給打散了，漏出了原本在陣列底下的垃圾字節！
-*   **完美修復**:
-    *   將條件簡化為 `if self.q7`。
-    *   **邏輯重塑**: 只要 Disk II 處於寫入模式 (`Q7=1`)，哪怕 `Q6` 在指令間來回切換，陣列的指標也**絕對凍結**，唯一獲准移動指標的只有 CPU 執行 `STA $C08D` (`write_io`) 的那一瞬間！這賦予了軟體模擬 100% 的同步抗性與精準度。
-
----
-*   **技術 A: 4-Cycle 位元移位 (Bit-level Shifting)**:
-    *   **原理**: 將 `tick()` 解析度從 32 週期 (byte) 提升至 4 週期 (bit)。
-    *   **細節**: 模擬 74LS165 移位暫存器。讀取時，位元逐一移入 `shift_register`，直到 MSB=1 時才鎖存至 `data_latch`；寫入時，每 4 週期將 MSB 刻入磁軌。
-    *   **目的**: 消除 CPU 指令與位元組邊界不對齊導致的「相位抖動」，解決寫入時的同步位元偏移。
-*   **技術 B: ROM 外部化與單一來源 (Single Source of Truth)**:
-    *   **實作**: 徹底刪除原始碼中的 Hex 陣列，改用 `include_bytes!("disk2_p6.rom")` 於編譯時嵌入。
-    *   **優化**: 重構 `memory.rs` 路由，將 `$C600..$C6FF` 區域優先映射至磁碟控制器 ROM，修正了原本讀取為全 0 的邏輯錯誤。
-*   **當前挑戰**:
-    *   **啟動當機 (Startup Hang)**: 實施變更後 Pico 燒錄後無 Serial 輸出。疑似 `Box<Disk2>` 初始化順序或 `include_bytes!` 宏在特定編譯器下導致的記憶體非法存取。
-
-\
-## 2026-03-27: ROM Correctness & Disk I/O Reliability Refactor
-
-### ����״_�G
-1. **ROM ���W�P�M�g�ץ�**: 
-   - �E�_�o�{ P5 (Boot ROM) �P P6 (Sequencer ROM) �b�N�X���R�W�A�ˡC
-   - �ץ���Gdisk2_p5.rom �� Boot ROM (Signature: A2 20)�Adisk2_p6.rom �� Sequencer�C
-   - �ץ��t�� ROM �X���޿�A�T�O 12KB pple2_sys.rom ������ƥ��T���]�V�q (\)�A���\�ѨM�}������ '@' �e���C
-
-2. **�Ϻм�����״���**: 
-   - �N pple2_tick ���������ɫױq 1000 �����O���C�� **32 ��**�A��{ CPU �P�ϺЦ줸�լy (32 cycles/byte) �� 1:1 �P�B�C
-   - ��@�F \ �Ȧs���uŪ����M�� MSB�v���w��S�ʡA�T�O Boot ROM Ū���`�����ǽT�ʡC
-
-3. **�Ϻмg�J�P�ѪR (Nibble/Denibble) �u��**: 
-   - �o�{ Updated 15 sectors ������]�G�ϭy�Ŷ������P�ۼv���Y�z�Z�C
-   - �ץ��G�N�ϰ϶��ش�֥H����ϭy�l�q�A�ñN denibblize ��^�Y�檺�줸�չ���j�M�C
-   - �W�[�ֳt����j�M�޿�A�j�T���� Arduino �ݳB�z�ϭy�g�^ SD �d���į�C
-
-### �ثe���A�G
-- **Ū��**: �������`�A�i�J Basic �Τ޾� DOS ���Z�C
-- **�g�J**: �n��h�� SAVE �L���~�A�����z�h�� denibblize �����o 15/16 �ϰϤ����A�w�����u�ƥN�X�ݳ̫����ҡC
-- **�w��**: �]�� FFI �ե��W�v�j�T�W�[�APico USB �T���ܺC�A�ɭP�N����������ѡA��ĳ�U���Ұʮɤ�ʶi�J BOOTSEL�C\
