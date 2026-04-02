@@ -140,6 +140,7 @@ impl Disk2 {
                             // 寫入模式下 (Q7=1)，位元組的步進完全由 write_io 的指令觸發控制。
                             // 即使 Q6 暫時變成 0 (DOS 執行 ORA $C08C)，也是寫入序列的一部分，絕對不能自動推進！
                         } else {
+                            if self.byte_index >= 6656 { self.byte_index = 0; }
                             self.data_latch = TRACK_DATA_RAW[self.byte_index];
                             self.byte_index = (self.byte_index + 1) % 6656;
                         }

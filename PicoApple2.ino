@@ -326,6 +326,13 @@ void loop() {
 
   if (!g_boot_ready) { yield(); return; }
 
+  // 心跳日誌：每秒輸出一次，確認 Core 0 是否運作中
+  static unsigned long last_core0_hb = 0;
+  if (millis() - last_core0_hb > 1000) {
+    Serial.println("HEARTBEAT: CORE 0 OK");
+    last_core0_hb = millis();
+  }
+
   // 處理來自 Core 1 的 SD 卡操作請求
   if (req_scan_disks && !ack_scan_disks) {
     scanDiskFiles();
@@ -482,6 +489,13 @@ void drawDiskMenu() {
 
 void loop1() {
   unsigned long now = millis();
+
+  // 心跳日誌：每秒輸出一次，確認 Core 1 是否運作中
+  static unsigned long last_core1_hb = 0;
+  if (millis() - last_core1_hb > 1000) {
+    Serial.println("HEARTBEAT: CORE 1 OK");
+    last_core1_hb = millis();
+  }
   
   // 將 GPIO 按鍵讀取移到最前面，且不受 40ms 幀率限制
   joy_up = (digitalRead(BTN_UP) == LOW); 
