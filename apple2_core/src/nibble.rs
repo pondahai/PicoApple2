@@ -67,7 +67,9 @@ pub fn denibblize_track(raw: &[u8], dirty: &[bool], len: usize, _track: u8, out_
     let decode4x4 = |v1: u8, v2: u8| -> u8 { ((v1 << 1) | 1) & v2 };
 
     let mut i = 0;
-    while i < len {
+    let mut iterations = 0;
+    while i < len && iterations < len * 2 {
+        iterations += 1;
         // 搜尋 Address Header: D5 AA 96
         if raw[i] == 0xD5 && raw[(i + 1) % len] == 0xAA && raw[(i + 2) % len] == 0x96 {
             let s1 = raw[(i + 7) % len];
