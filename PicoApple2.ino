@@ -67,6 +67,7 @@ extern "C" {
   const uint8_t* apple2_get_ram_ptr();
   const uint8_t* apple2_get_char_rom_ptr();
   uint8_t apple2_get_video_mode();
+  uint16_t apple2_get_beam_y();
   bool apple2_is_ready_for_key();
   void apple2_handle_key(uint8_t ascii);
   void apple2_set_paddle(uint8_t index, uint8_t value);
@@ -400,28 +401,10 @@ void setup1() {
   g_boot_ready = true; 
 }
 
-void loop1() {
-  g_core1_heartbeat++;
-  unsigned long now = millis();
-
-  static unsigned long last_monitor_t = 0;
-  if (now - last_monitor_t > 1000) {
-    if (g_boot_ready) {
-      uint16_t pc; uint8_t a, x, y, sp, status;
-      uint32_t irq = spin_lock_blocking(res_lock);
-      apple2_get_cpu_state(&pc, &a, &x, &y, &sp, &status);
-      spin_unlock(res_lock, irq);
-      Serial.printf("MON: [C0_CP=%d] [C1_T=%d] [PC=$%04X A=%02X X=%02X Y=%02X SP=%02X ST=%02X]\n", 
-                    g_c0_checkpoint, g_core1_heartbeat, pc, a, x, y, sp, status);
-    }
-    last_monitor_t = now;
-  }
-
-  joy_up = (digitalRead(BTN_UP) == LOW); joy_down = (digitalRead(BTN_DOWN) == LOW);
-  joy_left = (digitalRead(BTN_LEFT) == LOW); joy_right = (digitalRead(BTN_RIGHT) == LOW);
-  joy_btn0 = (digitalRead(BTN_A) == LOW); joy_btn1 = (digitalRead(BTN_B) == LOW);
+void scan_matrix() {
   static bool last_menu_p = false; bool menu_p = (digitalRead(BTN_MENU) == LOW);
   if (menu_p && !last_menu_p && !g_show_menu) { g_f_key_event = 3; } last_menu_p = menu_p;
+  
   for (int row = 0; row < 8; row++) {
     byte rS = (1 << row); fastWrite(LATCH_PIN, 0); shiftOut(DATA_OUT_PIN, CLOCK_PIN, MSBFIRST, 0); shiftOut(DATA_OUT_PIN, CLOCK_PIN, MSBFIRST, rS);
     fastWrite(LATCH_PIN, 1); delayMicroseconds(5); fastWrite(LATCH_PIN, 0); delayMicroseconds(1); fastWrite(LATCH_PIN, 1);
@@ -429,17 +412,32 @@ void loop1() {
     for (int col = 0; col < 8; col++) keyState[row][7 - col] = (colData & (1 << col));
   }
   fastWrite(CLOCK_PIN, 1); delayMicroseconds(2); fastWrite(CLOCK_PIN, 0);
+  
   bool mat_joy_up = false, mat_joy_down = false, mat_joy_left = false, mat_joy_right = false, mat_joy_btn0 = false, mat_joy_btn1 = false;
   for (int r = 0; r < 8; r++) { for (int c = 0; c < 8; c++) { if (keyState[r][c]) { uint8_t k = (uint8_t)keymap_base[r][c]; if (k == 209) mat_joy_up = true; if (k == 210) mat_joy_down = true; if (k == 211) mat_joy_left = true; if (k == 212) mat_joy_right = true; if (k == 213) mat_joy_btn0 = true; if (k == 214) mat_joy_btn1 = true; } } }
-  joy_up = (digitalRead(BTN_UP) == LOW) || (g_joy_mode && mat_joy_up); joy_down = (digitalRead(BTN_DOWN) == LOW) || (g_joy_mode && mat_joy_down);
-  joy_left = (digitalRead(BTN_LEFT) == LOW) || (g_joy_mode && mat_joy_left); joy_right = (digitalRead(BTN_RIGHT) == LOW) || (g_joy_mode && mat_joy_right);
-  joy_btn0 = (digitalRead(BTN_A) == LOW) || mat_joy_btn0; joy_btn1 = (digitalRead(BTN_B) == LOW) || mat_joy_btn1;
+  
+  bool raw_up = (digitalRead(BTN_UP) == LOW) || (g_joy_mode && mat_joy_up);
+  bool raw_down = (digitalRead(BTN_DOWN) == LOW) || (g_joy_mode && mat_joy_down);
+  bool raw_left = (digitalRead(BTN_LEFT) == LOW) || (g_joy_mode && mat_joy_left);
+  bool raw_right = (digitalRead(BTN_RIGHT) == LOW) || (g_joy_mode && mat_joy_right);
+  bool raw_b0 = (digitalRead(BTN_A) == LOW) || mat_joy_btn0;
+  bool raw_b1 = (digitalRead(BTN_B) == LOW) || mat_joy_btn1;
+
+  unsigned long now_t = millis();
+  static unsigned long hold_up=0, hold_down=0, hold_left=0, hold_right=0, hold_b0=0, hold_b1=0;
+  if (raw_up) { joy_up=true; hold_up=now_t; } else if (now_t-hold_up>40) joy_up=false;
+  if (raw_down) { joy_down=true; hold_down=now_t; } else if (now_t-hold_down>40) joy_down=false;
+  if (raw_left) { joy_left=true; hold_left=now_t; } else if (now_t-hold_left>40) joy_left=false;
+  if (raw_right) { joy_right=true; hold_right=now_t; } else if (now_t-hold_right>40) joy_right=false;
+  if (raw_b0) { joy_btn0=true; hold_b0=now_t; } else if (now_t-hold_b0>40) joy_btn0=false;
+  if (raw_b1) { joy_btn1=true; hold_b1=now_t; } else if (now_t-hold_b1>40) joy_btn1=false;
+
   bool isShiftPressed = keyState[3][5], isCtrlPressed = keyState[2][6];
   for (int r = 0; r < 8; r++) {
     for (int c = 0; c < 8; c++) {
       bool p = keyState[r][c];
-      if (p != lastKeyState[r][c] && (now - lastKeyTime[r][c] > 30)) {
-        lastKeyTime[r][c] = now; lastKeyState[r][c] = p;
+      if (p != lastKeyState[r][c] && (now_t - lastKeyTime[r][c] > 30)) {
+        lastKeyTime[r][c] = now_t; lastKeyState[r][c] = p;
         if (r == 3 && c == 7) { isFnPressed = p; continue; }
         if (r == 3 && c == 5 || r == 2 && c == 6) continue;
         if (p) {
@@ -460,8 +458,27 @@ void loop1() {
   if (g_f_key_event == 2) { g_f_key_event = 0; uint32_t irq = spin_lock_blocking(res_lock); apple2_reset(); spin_unlock(res_lock, irq); req_reload_track0 = true; }
   if (g_f_key_event == 3) { g_f_key_event = 0; g_emu_paused = true; req_scan_disks = true; ack_scan_disks = false; g_show_menu = true; tft_dma.fillScreen(0x0000); drawString(30, 30, "SCANNING SD...", 0xFFFF, 0x0000); }
   if (g_f_key_event == 4) { g_f_key_event = 0; g_joy_mode = !g_joy_mode; drawString(20, 222, g_joy_mode ? "ARROWS: JOYSTICK" : "ARROWS: KEYBOARD", 0x07E0, 0x0000); }
+}
+
+void loop1() {
+  g_core1_heartbeat++;
+  unsigned long now = millis();
+
+  static unsigned long last_monitor_t = 0;
+  if (now - last_monitor_t > 1000) {
+    if (g_boot_ready) {
+      uint16_t pc; uint8_t a, x, y, sp, status;
+      uint32_t irq = spin_lock_blocking(res_lock);
+      apple2_get_cpu_state(&pc, &a, &x, &y, &sp, &status);
+      spin_unlock(res_lock, irq);
+      Serial.printf("MON: [C0_CP=%d] [C1_T=%d] [PC=$%04X A=%02X X=%02X Y=%02X SP=%02X ST=%02X]\n", 
+                    g_c0_checkpoint, g_core1_heartbeat, pc, a, x, y, sp, status);
+    }
+    last_monitor_t = now;
+  }
 
   if (g_show_menu) {
+    scan_matrix();
     if (req_scan_disks) { if (ack_scan_disks) { req_scan_disks = false; selected_file_idx = 0; if (disk_file_count > 0) drawDiskMenu(); else drawString(30, 50, "NO DSK FILES FOUND", 0xF800, 0x0000); } return; }
     static uint32_t last_m_nav = 0; bool b_u = joy_up || (g_menu_cmd == 1), b_d = joy_down || (g_menu_cmd == 2), b_e = joy_btn0 || (g_menu_cmd == 3), b_q = joy_btn1 || (g_menu_cmd == 4);
     if ((b_u || b_d || b_e || b_q) && millis() - last_m_nav > 200) {
@@ -470,61 +487,95 @@ void loop1() {
     }    return;
   }
   
-  static unsigned long last_f = 0;
-  if (now - last_f > 40) { 
-    last_f = now; 
-    uint32_t irq = spin_lock_blocking(res_lock);
-    const uint8_t* ram = apple2_get_ram_ptr(); const uint8_t* char_rom = apple2_get_char_rom_ptr(); uint8_t v_m = apple2_get_video_mode(); bool motor_on = apple2_get_disk_motor_status();
-    spin_unlock(res_lock, irq);
-    
-    if (g_last_m_on == -1 || motor_on != (g_last_m_on == 1) || (motor_on && last_loaded_track != g_last_drawn_track)) { 
-      if (g_last_m_on == -1 || motor_on != (g_last_m_on == 1)) { tft_dma.drawRect(305, 10, 8, 8, motor_on ? 0xF800 : 0x0000); }
-      if (motor_on) {
-        if (g_last_drawn_track != last_loaded_track) {
-          tft_dma.drawRect(305, 24, 8, 192, 0x18E3);
-          int handle_y = 24 + (last_loaded_track * 184 / 34);
-          if (handle_y > 208) handle_y = 208;
-          tft_dma.drawRect(305, handle_y, 8, 8, 0x07E0);
-          g_last_drawn_track = last_loaded_track;
+  static uint16_t next_draw_y = 0;
+  static bool is_even_field = true;
+  uint16_t cpu_y = apple2_get_beam_y();
+  
+  if (cpu_y < next_draw_y && (next_draw_y - cpu_y > 100)) {
+      tft_dma.waitTransferDone(); 
+      gpio_put(PIN_DISPLAY_CS, 1);
+      is_even_field = !is_even_field;
+      next_draw_y = 0;
+      
+      uint32_t irq = spin_lock_blocking(res_lock);
+      bool motor_on = apple2_get_disk_motor_status();
+      spin_unlock(res_lock, irq);
+      
+      if (g_last_m_on == -1 || motor_on != (g_last_m_on == 1) || (motor_on && last_loaded_track != g_last_drawn_track)) { 
+        if (g_last_m_on == -1 || motor_on != (g_last_m_on == 1)) { tft_dma.drawRect(305, 10, 8, 8, motor_on ? 0xF800 : 0x0000); }
+        if (motor_on) {
+          if (g_last_drawn_track != last_loaded_track) {
+            tft_dma.drawRect(305, 24, 8, 192, 0x18E3);
+            int handle_y = 24 + (last_loaded_track * 184 / 34);
+            if (handle_y > 208) handle_y = 208;
+            tft_dma.drawRect(305, handle_y, 8, 8, 0x07E0);
+            g_last_drawn_track = last_loaded_track;
+          }
+        } else if (g_last_drawn_track != -1) {
+          tft_dma.drawRect(305, 24, 8, 192, 0x0000);
+          g_last_drawn_track = -1;
         }
-      } else if (g_last_drawn_track != -1) {
-        tft_dma.drawRect(305, 24, 8, 192, 0x0000);
-        g_last_drawn_track = -1;
+        g_last_m_on = motor_on ? 1 : 0; 
       }
-      g_last_m_on = motor_on ? 1 : 0; 
-    }
-    if (ram && char_rom) {
-      bool text_m = (v_m & 0x01) != 0, mixed_m = (v_m & 0x02) != 0, page2 = (v_m & 0x04) != 0, hires_m = (v_m & 0x08) != 0, blink_on = (millis() >> 8) & 0x01;
-      tft_dma.startFrame(20, 24, 299, 215);
-      for (int y = 0; y < 192; y++) {
-        uint16_t* line_ptr = scanline_buffers[current_buf_idx];
-        if (text_m || (mixed_m && y >= 160)) {
-          uint16_t r_addr = get_text_row_addr(y / 8);
-          for (int col = 0; col < 40; col++) {
-            uint8_t raw = ram[r_addr + col], c_idx = raw & 0x7F; if (raw < 0x80) { if (c_idx < 0x20) c_idx += 0x40; else if (c_idx >= 0x60) c_idx -= 0x40; }
-            bool inv = (raw < 0x40) || (raw < 0x80 && blink_on); uint8_t font = char_rom[c_idx * 8 + (y % 8)];
-            for (int x = 0; x < 7; x++) { bool p = (font & (1 << (6 - x))) != 0; if (inv) p = !p; line_ptr[col * 7 + x] = __builtin_bswap16(p ? 0xFFFF : 0x0000); }
-          }
-        } else if (hires_m) {
-          uint16_t r_addr = get_hires_row_addr(y, page2); bool p_bit = false;
-          for (int col = 0; col < 40; col++) {
-            uint8_t b = ram[r_addr + col]; bool shift = (b & 0x80) != 0;
-            for (int bit = 0; bit < 7; bit++) {
-              bool c_bit = (b & (1 << bit)) != 0, n_bit = (bit < 6) ? ((b & (1 << (bit + 1))) != 0) : ((col < 39) ? ((ram[r_addr + col + 1] & 0x01) != 0) : false);
-              uint16_t color = 0; if (c_bit) { if (p_bit || n_bit) color = 0xFFFF; else { bool even = ((col * 7 + bit) % 2) == 0; color = (!shift) ? (even ? palette[3] : palette[12]) : (even ? palette[6] : palette[9]); } }
-              line_ptr[col * 7 + bit] = __builtin_bswap16(color); p_bit = c_bit;
-            }
-          }
-        } else {
-          uint16_t r_addr = get_text_row_addr(y / 8); bool lower = (y % 8) < 4;
-          for (int col = 0; col < 40; col++) {
-            uint8_t val = ram[r_addr + col], c_idx = lower ? (val & 0x0F) : (val >> 4);
-            uint16_t color = palette[c_idx & 0x0F]; for (int x = 0; x < 7; x++) { line_ptr[col * 7 + x] = __builtin_bswap16(color); }
-          }
-        }
-        tft_dma.waitTransferDone(); tft_dma.sendScanlineAsync(line_ptr, 280); current_buf_idx = 1 - current_buf_idx;
-      }
-      tft_dma.waitTransferDone(); gpio_put(PIN_DISPLAY_CS, 1);
-    }
+
+      // --- VBLANK MATRIX SCAN ---
+      // Execute the matrix scan ONLY once per frame during VBLANK.
+      // This is perfectly synced with 60Hz and completely avoids SPI DMA running concurrently.
+      scan_matrix();
   }
+
+  while (next_draw_y <= cpu_y && next_draw_y < 192) {
+      if ((next_draw_y % 2 == 0) == is_even_field) {
+          tft_dma.waitTransferDone();
+          
+          static const uint8_t* ram = apple2_get_ram_ptr(); 
+          static const uint8_t* char_rom = apple2_get_char_rom_ptr(); 
+          uint8_t v_m = apple2_get_video_mode(); 
+          
+          if (ram && char_rom) {
+              bool text_m = (v_m & 0x01) != 0, mixed_m = (v_m & 0x02) != 0, page2 = (v_m & 0x04) != 0, hires_m = (v_m & 0x08) != 0, blink_on = (millis() >> 8) & 0x01;
+              int y = next_draw_y;
+              uint16_t* line_ptr = scanline_buffers[current_buf_idx];
+              
+              if (text_m || (mixed_m && y >= 160)) {
+                uint16_t r_addr = get_text_row_addr(y / 8);
+                for (int col = 0; col < 40; col++) {
+                  uint8_t raw = ram[r_addr + col], c_idx = raw & 0x7F; if (raw < 0x80) { if (c_idx < 0x20) c_idx += 0x40; else if (c_idx >= 0x60) c_idx -= 0x40; }
+                  bool inv = (raw < 0x40) || (raw < 0x80 && blink_on); uint8_t font = char_rom[c_idx * 8 + (y % 8)];
+                  for (int x = 0; x < 7; x++) { bool p = (font & (1 << (6 - x))) != 0; if (inv) p = !p; line_ptr[col * 7 + x] = __builtin_bswap16(p ? 0xFFFF : 0x0000); }
+                }
+              } else if (hires_m) {
+                uint16_t r_addr = get_hires_row_addr(y, page2); bool p_bit = false;
+                for (int col = 0; col < 40; col++) {
+                  uint8_t b = ram[r_addr + col]; bool shift = (b & 0x80) != 0;
+                  for (int bit = 0; bit < 7; bit++) {
+                    bool c_bit = (b & (1 << bit)) != 0, n_bit = (bit < 6) ? ((b & (1 << (bit + 1))) != 0) : ((col < 39) ? ((ram[r_addr + col + 1] & 0x01) != 0) : false);
+                    uint16_t color = 0; if (c_bit) { if (p_bit || n_bit) color = 0xFFFF; else { bool even = ((col * 7 + bit) % 2) == 0; color = (!shift) ? (even ? palette[3] : palette[12]) : (even ? palette[6] : palette[9]); } }
+                    line_ptr[col * 7 + bit] = __builtin_bswap16(color); p_bit = c_bit;
+                  }
+                }
+              } else {
+                uint16_t r_addr = get_text_row_addr(y / 8); bool lower = (y % 8) < 4;
+                for (int col = 0; col < 40; col++) {
+                  uint8_t val = ram[r_addr + col], c_idx = lower ? (val & 0x0F) : (val >> 4);
+                  uint16_t color = palette[c_idx & 0x0F]; for (int x = 0; x < 7; x++) { line_ptr[col * 7 + x] = __builtin_bswap16(color); }
+                }
+              }
+              
+              tft_dma.startFrame(20, 24 + y, 299, 24 + y);
+              tft_dma.sendScanlineAsync(line_ptr, 280); 
+              current_buf_idx = 1 - current_buf_idx;
+          }
+      }
+      next_draw_y++;
+  }
+  
+  if (next_draw_y <= cpu_y) {
+      next_draw_y = cpu_y + 1;
+  }
+  
+  // Ensure DMA is completely finished before exiting loop1.
+  // This guarantees that the matrix scan at the start of the next loop1() iteration
+  // runs on a completely quiet SPI bus, preventing 62.5MHz crosstalk noise.
+  tft_dma.waitTransferDone();
 }

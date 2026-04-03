@@ -27,6 +27,9 @@ impl Apple2Machine {
         self.mem.finalize_cpu_step_cycles(cycles);
         self.mem.end_cpu_step();
         self.total_cycles = self.total_cycles.wrapping_add(cycles as u64);
+        
+        crate::BEAM_Y.store(((self.total_cycles % 17030) / 65) as u32, core::sync::atomic::Ordering::Relaxed);
+        
         cycles
     }
 

@@ -2,6 +2,7 @@
 
 use core::panic::PanicInfo;
 use core::ptr::addr_of_mut;
+use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _critical_section_1_0_acquire() -> u8 { 0 }
@@ -25,6 +26,9 @@ pub static mut TRACK_DATA_RAW: [u8; 6656] = [0u8; 6656];
 pub static mut TRACK_DATA_DIRTY: [bool; 6656] = [false; 6656];
 pub static mut WRITE_LOG: [u8; 1024] = [0; 1024];
 pub static mut WRITE_LOG_IDX: usize = 0;
+
+pub static BEAM_Y: AtomicU32 = AtomicU32::new(0);
+pub static VIDEO_MODE: AtomicU8 = AtomicU8::new(0);
 
 static mut MACHINE: Option<Apple2Machine> = None;
 
@@ -89,6 +93,17 @@ pub extern "C" fn apple2_get_video_mode() -> u8 {
             if m.mem.page2 { mode |= 0x04; }
             if m.mem.hires_mode { mode |= 0x08; }
             return mode;
+        }
+        0
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn apple2_get_beam_y() -> u16 {
+    unsafe {
+        if let Some(ref m) = *addr_of_mut!(MACHINE) {
+            // 17030 cycles per frame, 65 cycles per line.
+            return ((m.total_cycles % 17030) / 65) as u16;
         }
         0
     }
