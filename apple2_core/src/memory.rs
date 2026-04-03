@@ -113,8 +113,13 @@ impl Memory for Apple2Memory {
             }
             0xD000..=0xFFFF => {
                 if self.lc_read_enable {
-                    let off = if addr < 0xE000 { if self.lc_bank2 { 0x1000 } else { 0 } } else { 0x2000 };
-                    unsafe { crate::LC_RAM_16K[(addr - 0xD000 + off as u16) as usize] }
+                    let idx = if addr < 0xE000 {
+                        let base = (addr - 0xD000) as usize;
+                        if self.lc_bank2 { base } else { base + 4096 }
+                    } else {
+                        (addr - 0xE000) as usize + 8192
+                    };
+                    if idx < 16384 { unsafe { crate::LC_RAM_16K[idx] } } else { 0xFF }
                 } else { self.rom[(addr - 0xD000) as usize] }
             }
         }
@@ -139,8 +144,17 @@ impl Memory for Apple2Memory {
             }
             0xD000..=0xFFFF => {
                 if self.lc_write_enable {
-                    let off = if addr < 0xE000 { if self.lc_bank2 { 0x1000 } else { 0 } } else { 0x2000 };
-                    unsafe { crate::LC_RAM_16K[(addr - 0xD000 + off as u16) as usize] = data; }
+                    let idx = if addr < 0xE000 {
+                        // $D000-$DFFF: Bank 2 (0..4095), Bank 1 (4096..8191)
+                        let base = (addr - 0xD000) as usize;
+                        if self.lc_bank2 { base } else { base + 4096 }
+                    } else {
+                        // $E000-$FFFF: (8192..16383)
+                        (addr - 0xE000) as usize + 8192
+                    };
+                    if idx < 16384 {
+                        unsafe { crate::LC_RAM_16K[idx] = data; }
+                    }
                 }
             }
         }

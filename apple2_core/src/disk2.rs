@@ -131,14 +131,15 @@ impl Disk2 {
     pub fn tick(&mut self, cycles: u32) {
         if self.motor_on {
             self.cycles_accumulator += cycles;
+            let mut iters = 0;
             if self.is_disk_loaded {
                 unsafe {
                     use crate::{TRACK_DATA_RAW, TRACK_DATA_DIRTY};
-                    while self.cycles_accumulator >= 32 {
+                    while self.cycles_accumulator >= 32 && iters < 256 {
                         self.cycles_accumulator -= 32;
+                        iters += 1;
                         if self.q7 {
                             // 寫入模式下 (Q7=1)，位元組的步進完全由 write_io 的指令觸發控制。
-                            // 即使 Q6 暫時變成 0 (DOS 執行 ORA $C08C)，也是寫入序列的一部分，絕對不能自動推進！
                         } else {
                             if self.byte_index >= 6656 { self.byte_index = 0; }
                             self.data_latch = TRACK_DATA_RAW[self.byte_index];
@@ -147,14 +148,13 @@ impl Disk2 {
                     }
                 }
             } else {
-                // 如果沒載入磁碟，馬達空轉時讓 data_latch 呈現 Sync 位元
-                while self.cycles_accumulator >= 32 {
+                while self.cycles_accumulator >= 32 && iters < 256 {
                     self.cycles_accumulator -= 32;
+                    iters += 1;
                     self.data_latch = 0xFF; 
                 }
             }
-            // 限制 accumulator 避免溢出
-            if self.cycles_accumulator > 1000 { self.cycles_accumulator = 0; }
+            if iters >= 256 || self.cycles_accumulator > 1000 { self.cycles_accumulator = 0; }
         }
     }
 
