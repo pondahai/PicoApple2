@@ -124,6 +124,8 @@ uint8_t track_buffer[4096];
 uint8_t last_loaded_track = 0;
 String g_current_disk_path = "/MASTER.DSK";
 bool g_show_menu = false;
+bool g_joy_mode = true;
+int g_last_m_on = -1;
 String disk_files[20]; 
 int disk_file_count = 0;
 int selected_file_idx = 0;
@@ -230,7 +232,11 @@ void loop() {
         uint8_t type = proto_cmd[0]; uint8_t idx = proto_cmd[1]; uint8_t stat = proto_cmd[2]; bool b = (stat == 1);
         if (type == 'J') {
           if (b && g_show_menu) { if (idx == 0) g_menu_cmd = 1; else if (idx == 1) g_menu_cmd = 2; else if (idx == 4) g_menu_cmd = 3; else if (idx == 5) g_menu_cmd = 4; }
-          if (idx == 0) ser_joy_up = b; else if (idx == 1) ser_joy_down = b; else if (idx == 2) ser_joy_left = b; else if (idx == 3) ser_joy_right = b; else if (idx == 4) ser_joy_btn0 = b; else if (idx == 5) ser_joy_btn1 = b;
+          if (g_joy_mode || idx >= 4) {
+            if (idx == 0) ser_joy_up = b; else if (idx == 1) ser_joy_down = b; else if (idx == 2) ser_joy_left = b; else if (idx == 3) ser_joy_right = b; else if (idx == 4) ser_joy_btn0 = b; else if (idx == 5) ser_joy_btn1 = b;
+          } else if (b) {
+            if (idx == 0) pushKey(0x0B); else if (idx == 1) pushKey(0x0A); else if (idx == 2) pushKey(0x08); else if (idx == 3) pushKey(0x15);
+          }
         } else if (type == 'K' && stat == 1) {
           if (g_show_menu) { if (idx == 0x0D) g_menu_cmd = 3; else if (idx == 0x1B) g_menu_cmd = 4; }
           if (idx == 112) g_f_key_event = 1; else if (idx == 113) g_f_key_event = 2; else if (idx == 114) g_f_key_event = 3; else pushKey(idx); 
@@ -254,15 +260,16 @@ void loop() {
       if (esc_idx < 7) { esc_buf[esc_idx++] = sK; esc_buf[esc_idx] = 0; }
       if ((sK >= 'A' && sK <= 'Z') || sK == '~') {
         if (esc_buf[0] == '[') {
-          if (sK == 'A') { if (g_show_menu) g_menu_cmd = 1; else { ser_joy_up = true; last_ansi_joy_t = millis(); } }
-          else if (sK == 'B') { if (g_show_menu) g_menu_cmd = 2; else { ser_joy_down = true; last_ansi_joy_t = millis(); } }
-          else if (sK == 'C') { if (!g_show_menu) { ser_joy_right = true; last_ansi_joy_t = millis(); } }
-          else if (sK == 'D') { if (!g_show_menu) { ser_joy_left = true; last_ansi_joy_t = millis(); } }
+          if (sK == 'A') { if (g_show_menu) g_menu_cmd = 1; else if (!g_joy_mode) pushKey(0x0B); else { ser_joy_up = true; last_ansi_joy_t = millis(); } }
+          else if (sK == 'B') { if (g_show_menu) g_menu_cmd = 2; else if (!g_joy_mode) pushKey(0x0A); else { ser_joy_down = true; last_ansi_joy_t = millis(); } }
+          else if (sK == 'C') { if (!g_show_menu) { if (!g_joy_mode) pushKey(0x15); else { ser_joy_right = true; last_ansi_joy_t = millis(); } } }
+          else if (sK == 'D') { if (!g_show_menu) { if (!g_joy_mode) pushKey(0x08); else { ser_joy_left = true; last_ansi_joy_t = millis(); } } }
           else if (strcmp(esc_buf, "[5~") == 0) { if (!g_show_menu) { ser_joy_btn0 = true; last_ansi_joy_t = millis(); } }
           else if (strcmp(esc_buf, "[6~") == 0) { if (!g_show_menu) { ser_joy_btn1 = true; last_ansi_joy_t = millis(); } }
           else if (strcmp(esc_buf, "[11~") == 0 || strcmp(esc_buf, "OP") == 0) g_f_key_event = 1;
           else if (strcmp(esc_buf, "[12~") == 0 || strcmp(esc_buf, "OQ") == 0) g_f_key_event = 2;
           else if (strcmp(esc_buf, "[13~") == 0 || strcmp(esc_buf, "OR") == 0) g_f_key_event = 3;
+          else if (strcmp(esc_buf, "[15~") == 0 || strcmp(esc_buf, "OS") == 0) g_f_key_event = 4;
         } else if (esc_buf[0] == 'O') { if (sK == 'P') g_f_key_event = 1; else if (sK == 'Q') g_f_key_event = 2; else if (sK == 'R') g_f_key_event = 3; }
         esc_state = 0;
       }
@@ -376,6 +383,7 @@ void setup1() {
   
   spi_set_baudrate(spi0, 62500000);
   tft_dma.fillScreen(palette[0]);
+  drawString(20, 222, g_joy_mode ? "ARROWS: JOYSTICK" : "ARROWS: KEYBOARD", 0x07E0, 0x0000);
   digitalWrite(PIN_DISPLAY_BL, HIGH);
   pinMode(BTN_UP, INPUT_PULLUP); pinMode(BTN_DOWN, INPUT_PULLUP);
   pinMode(BTN_LEFT, INPUT_PULLUP); pinMode(BTN_RIGHT, INPUT_PULLUP);
@@ -424,8 +432,8 @@ void loop1() {
   fastWrite(CLOCK_PIN, 1); delayMicroseconds(2); fastWrite(CLOCK_PIN, 0);
   bool mat_joy_up = false, mat_joy_down = false, mat_joy_left = false, mat_joy_right = false, mat_joy_btn0 = false, mat_joy_btn1 = false;
   for (int r = 0; r < 8; r++) { for (int c = 0; c < 8; c++) { if (keyState[r][c]) { uint8_t k = (uint8_t)keymap_base[r][c]; if (k == 209) mat_joy_up = true; if (k == 210) mat_joy_down = true; if (k == 211) mat_joy_left = true; if (k == 212) mat_joy_right = true; if (k == 213) mat_joy_btn0 = true; if (k == 214) mat_joy_btn1 = true; } } }
-  joy_up = (digitalRead(BTN_UP) == LOW) || mat_joy_up; joy_down = (digitalRead(BTN_DOWN) == LOW) || mat_joy_down;
-  joy_left = (digitalRead(BTN_LEFT) == LOW) || mat_joy_left; joy_right = (digitalRead(BTN_RIGHT) == LOW) || mat_joy_right;
+  joy_up = (digitalRead(BTN_UP) == LOW) || (g_joy_mode && mat_joy_up); joy_down = (digitalRead(BTN_DOWN) == LOW) || (g_joy_mode && mat_joy_down);
+  joy_left = (digitalRead(BTN_LEFT) == LOW) || (g_joy_mode && mat_joy_left); joy_right = (digitalRead(BTN_RIGHT) == LOW) || (g_joy_mode && mat_joy_right);
   joy_btn0 = (digitalRead(BTN_A) == LOW) || mat_joy_btn0; joy_btn1 = (digitalRead(BTN_B) == LOW) || mat_joy_btn1;
   bool isShiftPressed = keyState[3][5], isCtrlPressed = keyState[2][6];
   for (int r = 0; r < 8; r++) {
@@ -437,10 +445,10 @@ void loop1() {
         if (r == 3 && c == 5 || r == 2 && c == 6) continue;
         if (p) {
           uint8_t k = isShiftPressed ? (uint8_t)keymap_shift[r][c] : (uint8_t)keymap_base[r][c];
-          if (isFnPressed && k == '1') g_f_key_event = 1; else if (isFnPressed && (k == '2' || k == '@')) g_f_key_event = 2; else if (isFnPressed && (k == '3' || k == '#')) g_f_key_event = 3;
+          if (isFnPressed && k == '1') g_f_key_event = 1; else if (isFnPressed && (k == '2' || k == '@')) g_f_key_event = 2; else if (isFnPressed && (k == '3' || k == '#')) g_f_key_event = 3; else if (isFnPressed && (k == '4' || k == '$')) g_f_key_event = 4;
           else if (isFnPressed && (k == 'c' || k == 'C')) { g_caps_lock = !g_caps_lock; }
           else {
-            if (k >= 209 && k <= 214) k = 0; else if (k == 203) k = 0x0D; else if (k == 207) k = 0x1B; else if (k == 204) k = 0x08;
+            if (k >= 209 && k <= 214) { if (!g_joy_mode && k <= 212) { if (k == 209) k = 0x0B; else if (k == 210) k = 0x0A; else if (k == 211) k = 0x08; else if (k == 212) k = 0x15; } else k = 0; } else if (k == 203) k = 0x0D; else if (k == 207) k = 0x1B; else if (k == 204) k = 0x08;
             else if (isCtrlPressed) { if (k >= 'a' && k <= 'z') k = (k - 32) & 0x1F; else if (k >= '@' && k <= '_') k = k & 0x1F; else k = 0; }
             else { if (g_caps_lock && !isShiftPressed && k >= 'a' && k <= 'z') k -= 32; else if (g_caps_lock && isShiftPressed && k >= 'A' && k <= 'Z') k += 32; }
             if (k > 0) { if (!g_show_menu) pushKey(k); else { if (k == 0x0D) g_menu_cmd = 3; else if (k == 0x1B) g_menu_cmd = 4; } }
@@ -452,15 +460,15 @@ void loop1() {
   if (g_f_key_event == 1) { g_f_key_event = 0; uint32_t irq = spin_lock_blocking(res_lock); apple2_warm_reset(); spin_unlock(res_lock, irq); }
   if (g_f_key_event == 2) { g_f_key_event = 0; uint32_t irq = spin_lock_blocking(res_lock); apple2_reset(); spin_unlock(res_lock, irq); req_reload_track0 = true; }
   if (g_f_key_event == 3) { g_f_key_event = 0; g_emu_paused = true; req_scan_disks = true; ack_scan_disks = false; g_show_menu = true; tft_dma.fillScreen(0x0000); drawString(30, 30, "SCANNING SD...", 0xFFFF, 0x0000); }
-  
+  if (g_f_key_event == 4) { g_f_key_event = 0; g_joy_mode = !g_joy_mode; drawString(20, 222, g_joy_mode ? "ARROWS: JOYSTICK" : "ARROWS: KEYBOARD", 0x07E0, 0x0000); }
+
   if (g_show_menu) {
     if (req_scan_disks) { if (ack_scan_disks) { req_scan_disks = false; selected_file_idx = 0; if (disk_file_count > 0) drawDiskMenu(); else drawString(30, 50, "NO DSK FILES FOUND", 0xF800, 0x0000); } return; }
     static uint32_t last_m_nav = 0; bool b_u = joy_up || (g_menu_cmd == 1), b_d = joy_down || (g_menu_cmd == 2), b_e = joy_btn0 || (g_menu_cmd == 3), b_q = joy_btn1 || (g_menu_cmd == 4);
     if ((b_u || b_d || b_e || b_q) && millis() - last_m_nav > 200) {
-      if (disk_file_count > 0) { if (b_u) { selected_file_idx = (selected_file_idx - 1 + disk_file_count) % disk_file_count; drawDiskMenu(); } else if (b_d) { selected_file_idx = (selected_file_idx + 1) % disk_file_count; drawDiskMenu(); } else if (b_e) { req_load_disk_idx = selected_file_idx; g_show_menu = false; tft_dma.fillScreen(0); } }
-      if (b_q) { g_show_menu = false; g_emu_paused = false; tft_dma.fillScreen(0); } last_m_nav = millis(); g_menu_cmd = 0;
-    }
-    return;
+      if (disk_file_count > 0) { if (b_u) { selected_file_idx = (selected_file_idx - 1 + disk_file_count) % disk_file_count; drawDiskMenu(); } else if (b_d) { selected_file_idx = (selected_file_idx + 1) % disk_file_count; drawDiskMenu(); } else if (b_e) { req_load_disk_idx = selected_file_idx; g_show_menu = false; tft_dma.fillScreen(0); g_last_m_on = -1; drawString(20, 222, g_joy_mode ? "ARROWS: JOYSTICK" : "ARROWS: KEYBOARD", 0x07E0, 0x0000); } }
+      if (b_q) { g_show_menu = false; g_emu_paused = false; tft_dma.fillScreen(0); g_last_m_on = -1; drawString(20, 222, g_joy_mode ? "ARROWS: JOYSTICK" : "ARROWS: KEYBOARD", 0x07E0, 0x0000); } last_m_nav = millis(); g_menu_cmd = 0;
+    }    return;
   }
   
   static unsigned long last_f = 0;
@@ -470,7 +478,7 @@ void loop1() {
     const uint8_t* ram = apple2_get_ram_ptr(); const uint8_t* char_rom = apple2_get_char_rom_ptr(); uint8_t v_m = apple2_get_video_mode(); bool motor_on = apple2_get_disk_motor_status();
     spin_unlock(res_lock, irq);
     
-    static bool last_m_on = false; if (motor_on != last_m_on) { tft_dma.drawRect(305, 10, 8, 8, motor_on ? 0xF800 : 0x0000); last_m_on = motor_on; }
+    if (g_last_m_on == -1 || motor_on != (g_last_m_on == 1)) { tft_dma.drawRect(305, 10, 8, 8, motor_on ? 0xF800 : 0x0000); g_last_m_on = motor_on ? 1 : 0; }
     if (ram && char_rom) {
       bool text_m = (v_m & 0x01) != 0, mixed_m = (v_m & 0x02) != 0, page2 = (v_m & 0x04) != 0, hires_m = (v_m & 0x08) != 0, blink_on = (millis() >> 8) & 0x01;
       tft_dma.startFrame(20, 24, 299, 215);
