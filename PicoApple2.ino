@@ -421,10 +421,10 @@ void scan_matrix() {
   bool mat_joy_up = false, mat_joy_down = false, mat_joy_left = false, mat_joy_right = false, mat_joy_btn0 = false, mat_joy_btn1 = false;
   for (int r = 0; r < 8; r++) { for (int c = 0; c < 8; c++) { if (keyState[r][c]) { uint8_t k = (uint8_t)keymap_base[r][c]; if (k == 209) mat_joy_up = true; if (k == 210) mat_joy_down = true; if (k == 211) mat_joy_left = true; if (k == 212) mat_joy_right = true; if (k == 213) mat_joy_btn0 = true; if (k == 214) mat_joy_btn1 = true; } } }
   
-  bool raw_up = (digitalRead(BTN_UP) == LOW) || (g_joy_mode && mat_joy_up);
-  bool raw_down = (digitalRead(BTN_DOWN) == LOW) || (g_joy_mode && mat_joy_down);
-  bool raw_left = (digitalRead(BTN_LEFT) == LOW) || (g_joy_mode && mat_joy_left);
-  bool raw_right = (digitalRead(BTN_RIGHT) == LOW) || (g_joy_mode && mat_joy_right);
+  bool raw_up = (digitalRead(BTN_UP) == LOW) || ((g_joy_mode || g_show_menu) && mat_joy_up);
+  bool raw_down = (digitalRead(BTN_DOWN) == LOW) || ((g_joy_mode || g_show_menu) && mat_joy_down);
+  bool raw_left = (digitalRead(BTN_LEFT) == LOW) || ((g_joy_mode || g_show_menu) && mat_joy_left);
+  bool raw_right = (digitalRead(BTN_RIGHT) == LOW) || ((g_joy_mode || g_show_menu) && mat_joy_right);
   bool raw_b0 = (digitalRead(BTN_A) == LOW) || mat_joy_btn0;
   bool raw_b1 = (digitalRead(BTN_B) == LOW) || mat_joy_btn1;
 
