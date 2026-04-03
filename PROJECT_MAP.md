@@ -1,7 +1,7 @@
-# 🗺️ Pico Apple II Emulator Project Map (Updated 2026-03-27)
+# 🗺️ Pico Apple II Emulator Project Map (Updated 2026-04-03)
 
 ## 1. 核心結構 (Project Architecture)
-目前的架構採用 **「DMA 加速掃描線 JIT 渲染」** 與 **「即時狀態通訊協定」**：
+目前的架構採用 **「交錯式光柵同步渲染 (Interlaced VBLANK Sync)」**、**「無鎖原子狀態 (Lock-free Atomics)」** 與 **「即時狀態通訊協定」**：
 
 | 檔案路徑 | 功能說明 | 核心語言 | 備註 |
 | :--- | :--- | :--- | :--- |

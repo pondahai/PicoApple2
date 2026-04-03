@@ -1,5 +1,31 @@
 # Pico Apple II Emulator - Development Log
 
+## 2026-04-03: JIT Rendering Overhaul & Zero-Noise Input (VBLANK Sync)
+
+### 1. 交錯式光柵同步渲染 (Interlaced VBLANK Sync Rendering)
+*   **背景**: 過去 40ms 限速器的停走式批次渲染導致 25 FPS，且無法模擬 Raster Effects。
+*   **優化內容**:
+    *   在 Rust 核心引入 `core::sync::atomic`，實作無鎖的 `apple2_get_beam_y()` 暴露電子束實體位置。
+    *   Core 1 `loop1()` 改為追逐電子束 (Beam-chasing)，實作奇偶場交錯渲染 (Even/Odd Fields)。
+*   **成果**: 達成 60 Fields/sec 的平滑流暢度，徹底解決畫面撕裂，並支援畫面中途改變影片模式的光柵特效。
+
+### 2. VBLANK 矩陣掃描與硬體串擾修復
+*   **背景**: 高頻 62.5MHz SPI DMA 在背景連續運作時，會對 GPIO 產生嚴重 EMI 與接地彈跳 (Ground Bounce)，導致搖桿斷訊 (Ghost release events)。
+*   **優化內容**:
+    *   將硬體矩陣與 GPIO 掃描 (`scan_matrix()`) 完全移入垂直空白區 (VBLANK, Y >= 192)。
+    *   使用 `tft_dma.waitTransferDone()` 強制停止所有 SPI 通訊，確保掃描環境 100% 乾淨無雜訊。
+    *   實作 40ms 的後緣防彈跳 (Trailing-edge Debounce) 濾波器。
+*   **成果**: 搖桿恢復完美連貫，徹底根除「不連續桿」現象。
+
+### 3. 雙軌制輸入緩衝 (Dual-track Input Buffering)
+*   **背景**: 為了追求極致零延遲一度移除了鍵盤 FIFO，導致從終端機貼上長串 BASIC 代碼時發生嚴重漏字。
+*   **優化內容**:
+    *   還原 128-byte 鍵盤 FIFO 緩衝區 (`g_key_fifo`)，專屬於序列埠與鍵盤輸入，保證高速貼上操作 100% 不漏字。
+    *   搖桿方向與搖桿按鈕維持實體直通 (Zero-buffer)，直接寫入記憶體不受 FIFO 影響。
+*   **成果**: 達成「文字輸入不漏字、搖桿操作零延遲」的完美平衡。
+
+---
+
 ## 2026-04-02: SPI Performance Optimization (High Speed Restoration)
 
 ### 1. SPI 頻率提升

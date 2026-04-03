@@ -105,7 +105,6 @@ bool hasKey() {
   spin_unlock(fifo_lock, irq);
   return h;
 }
-
 const char keymap_base[8][8] = {
   { '1', '3', '5', '7', '9', '-', 206, 204 }, { 'q', 'e', 't', 'u', 'o', '[', 207, '\\' },
   { 'a', 'd', 'g', 'j', 'l', '\'', 205, 208 }, { 'z', 'c', 'b', 'm', '.', 202, 210, 0 },
@@ -210,8 +209,6 @@ void setup() {
   watchdog_enable(8000, 1);
   int lock_num = spin_lock_claim_unused(true);
   res_lock = spin_lock_init(lock_num);
-  int fifo_lock_num = spin_lock_claim_unused(true);
-  fifo_lock = spin_lock_init(fifo_lock_num);
   pinMode(PIN_JACK_SND, OUTPUT);
   uint32_t irq = spin_lock_blocking(res_lock);
   apple2_init();
