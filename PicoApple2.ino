@@ -233,13 +233,11 @@ void loop() {
         uint8_t type = proto_cmd[0]; uint8_t idx = proto_cmd[1]; uint8_t stat = proto_cmd[2]; bool b = (stat == 1);
         if (type == 'J') {
           if (b && g_show_menu) { if (idx == 0) g_menu_cmd = 1; else if (idx == 1) g_menu_cmd = 2; else if (idx == 4) g_menu_cmd = 3; else if (idx == 5) g_menu_cmd = 4; }
-          if (g_joy_mode || idx >= 4) {
-            if (idx == 0) ser_joy_up = b; else if (idx == 1) ser_joy_down = b; else if (idx == 2) ser_joy_left = b; else if (idx == 3) ser_joy_right = b; else if (idx == 4) ser_joy_btn0 = b; else if (idx == 5) ser_joy_btn1 = b;
-          } else if (b) {
-            if (idx == 0) pushKey(0x0B); else if (idx == 1) pushKey(0x0A); else if (idx == 2) pushKey(0x08); else if (idx == 3) pushKey(0x15);
+          if (idx == 0) ser_joy_up = b; else if (idx == 1) ser_joy_down = b; else if (idx == 2) ser_joy_left = b; else if (idx == 3) ser_joy_right = b; else if (idx == 4) ser_joy_btn0 = b; else if (idx == 5) ser_joy_btn1 = b;
+          if (!g_joy_mode && idx < 4 && b) {
+            if (idx == 0) pushKey(0x0B); else if (idx == 1) pushKey(0x0A); else if (idx == 2) pushKey(0x08); else if (idx == 3) pushKey(0x15);     
           }
-        } else if (type == 'K' && stat == 1) {
-          if (g_show_menu) { if (idx == 0x0D) g_menu_cmd = 3; else if (idx == 0x1B) g_menu_cmd = 4; }
+        } else if (type == 'K' && stat == 1) {          if (g_show_menu) { if (idx == 0x0D) g_menu_cmd = 3; else if (idx == 0x1B) g_menu_cmd = 4; }
           if (idx == 112) g_f_key_event = 1; else if (idx == 113) g_f_key_event = 2; else if (idx == 114) g_f_key_event = 3; else pushKey(idx); 
         }
         proto_state = 0;
@@ -302,8 +300,8 @@ void loop() {
 
   g_c0_checkpoint = 3; 
   uint32_t irq_joy = spin_lock_blocking(res_lock);
-  apple2_set_paddle(0, (joy_left || ser_joy_left) ? 0 : ((joy_right || ser_joy_right) ? 255 : 128));
-  apple2_set_paddle(1, (joy_up || ser_joy_up) ? 0 : ((joy_down || ser_joy_down) ? 255 : 128));
+  apple2_set_paddle(0, (joy_left || (g_joy_mode && ser_joy_left)) ? 0 : ((joy_right || (g_joy_mode && ser_joy_right)) ? 255 : 128));
+  apple2_set_paddle(1, (joy_up || (g_joy_mode && ser_joy_up)) ? 0 : ((joy_down || (g_joy_mode && ser_joy_down)) ? 255 : 128));
   apple2_set_button(0, joy_btn0 || ser_joy_btn0);
   apple2_set_button(1, joy_btn1 || ser_joy_btn1);
   spin_unlock(res_lock, irq_joy);
