@@ -22,6 +22,7 @@ void apple2_set_button(uint8_t index, bool pressed);
 
 // 顯示輸出 (新介面：零緩衝渲染)
 uint8_t apple2_get_video_mode(); // Bit 0:Text, 1:Mixed, 2:Page2, 3:Hires
+uint16_t apple2_get_beam_y();
 const uint8_t* apple2_get_ram_ptr(); 
 const uint8_t* apple2_get_char_rom_ptr(); 
 
