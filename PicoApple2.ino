@@ -91,6 +91,14 @@ void pushKey(uint8_t k) {
   if (next != g_key_tail) { g_key_fifo[g_key_head] = k; g_key_head = next; }
   spin_unlock(fifo_lock, irq);
 }
+
+void pushHardwareKey(uint8_t k) {
+  if (k == 0) return;
+  uint32_t irq = spin_lock_blocking(res_lock);
+  apple2_handle_key(k);
+  spin_unlock(res_lock, irq);
+}
+
 uint8_t popKey() {
   uint32_t irq = spin_lock_blocking(fifo_lock);
   if (g_key_head == g_key_tail) { spin_unlock(fifo_lock, irq); return 0; }
@@ -445,7 +453,7 @@ void scan_matrix() {
             if (k >= 209 && k <= 214) { if (!g_joy_mode && k <= 212) { if (k == 209) k = 0x0B; else if (k == 210) k = 0x0A; else if (k == 211) k = 0x08; else if (k == 212) k = 0x15; } else k = 0; } else if (k == 203) k = 0x0D; else if (k == 207) k = 0x1B; else if (k == 204) k = 0x08;
             else if (isCtrlPressed) { if (k >= 'a' && k <= 'z') k = (k - 32) & 0x1F; else if (k >= '@' && k <= '_') k = k & 0x1F; else k = 0; }
             else { if (g_caps_lock && !isShiftPressed && k >= 'a' && k <= 'z') k -= 32; else if (g_caps_lock && isShiftPressed && k >= 'A' && k <= 'Z') k += 32; }
-            if (k > 0) { if (!g_show_menu) pushKey(k); else { if (k == 0x0D) g_menu_cmd = 3; else if (k == 0x1B) g_menu_cmd = 4; } }
+            if (k > 0) { if (!g_show_menu) pushHardwareKey(k); else { if (k == 0x0D) g_menu_cmd = 3; else if (k == 0x1B) g_menu_cmd = 4; } }
           }
         }
       }
