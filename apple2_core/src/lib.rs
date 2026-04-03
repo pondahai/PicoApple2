@@ -67,8 +67,8 @@ pub extern "C" fn apple2_tick() -> u32 {
     unsafe {
         let mut total_cycles = 0;
         if let Some(ref mut m) = *addr_of_mut!(MACHINE) {
-            // 增加為 1000 條指令以極大化吞吐量，並加入早退機制防止磁軌失步
-            for _ in 0..1000 {
+            // 降回 300 條指令以確保鎖定時間不會過長導致 Core 1 等待超時
+            for _ in 0..300 {
                 total_cycles += m.step();
                 if m.mem.disk2.needs_reload {
                     break;
@@ -195,6 +195,20 @@ pub extern "C" fn apple2_get_write_log(out_buffer: *mut u8) -> u16 {
         }
         WRITE_LOG_IDX = 0;
         count as u16
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn apple2_get_cpu_state(out_pc: *mut u16, out_a: *mut u8, out_x: *mut u8, out_y: *mut u8, out_sp: *mut u8, out_status: *mut u8) {
+    unsafe {
+        if let Some(ref m) = *addr_of_mut!(MACHINE) {
+            *out_pc = m.cpu.pc;
+            *out_a = m.cpu.a;
+            *out_x = m.cpu.x;
+            *out_y = m.cpu.y;
+            *out_sp = m.cpu.sp;
+            *out_status = m.cpu.status.to_byte();
+        }
     }
 }
 
