@@ -156,6 +156,7 @@
             if (e.key === 'F2') { sendRaw([0x1B, 0x4F, 0x51]); e._handledByPico = true; e.preventDefault(); e.stopImmediatePropagation(); return false; }
             if (e.key === 'F3') { sendRaw([0x1B, 0x4F, 0x52]); e._handledByPico = true; e.preventDefault(); e.stopImmediatePropagation(); return false; }
             if (e.key === 'F4') { sendRaw([0x1B, 0x5B, 0x31, 0x35, 0x7E]); e._handledByPico = true; e.preventDefault(); e.stopImmediatePropagation(); return false; }
+            if (e.key === 'F5') { sendRaw([0x1B, 0x5B, 0x31, 0x37, 0x7E]); e._handledByPico = true; e.preventDefault(); e.stopImmediatePropagation(); return false; }
 
             // 3. Apple II ASCII 鍵盤
             let charCode = 0;
