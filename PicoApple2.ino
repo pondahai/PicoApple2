@@ -422,7 +422,7 @@ void setup1() {
 
 void scan_matrix() {
   static bool last_menu_p = false; bool menu_p = (digitalRead(BTN_MENU) == LOW);
-  if (menu_p && !last_menu_p && !g_show_menu) { g_f_key_event = 3; } last_menu_p = menu_p;
+  if (menu_p && !last_menu_p) { g_f_key_event = 3; } last_menu_p = menu_p;
   
   for (int row = 0; row < 8; row++) {
     byte rS = (1 << row); fastWrite(LATCH_PIN, 0); shiftOut(DATA_OUT_PIN, CLOCK_PIN, MSBFIRST, 0); shiftOut(DATA_OUT_PIN, CLOCK_PIN, MSBFIRST, rS);
@@ -473,16 +473,19 @@ void scan_matrix() {
       }
     }
   }
-  if (g_f_key_event == 1) { g_f_key_event = 0; uint32_t irq = spin_lock_blocking(res_lock); apple2_warm_reset(); spin_unlock(res_lock, irq); }
-  if (g_f_key_event == 2) { g_f_key_event = 0; uint32_t irq = spin_lock_blocking(res_lock); apple2_reset(); spin_unlock(res_lock, irq); req_reload_track0 = true; }
-  if (g_f_key_event == 3) { g_f_key_event = 0; g_emu_paused = true; req_scan_disks = true; ack_scan_disks = false; g_show_menu = true; tft_dma.fillScreen(0x0000); drawString(30, 30, "SCANNING SD...", 0xFFFF, 0x0000); }
-  if (g_f_key_event == 4) { g_f_key_event = 0; g_joy_mode = !g_joy_mode; updateStatusLine(); }
-  if (g_f_key_event == 5) { 
-    g_f_key_event = 0; 
-    g_speed_idx = (g_speed_idx + 1) % 4; 
-    updateStatusLine(); 
+  static unsigned long last_fkey_t = 0;
+  if (g_f_key_event > 0) {
+      if (millis() - last_fkey_t > 300) {
+          last_fkey_t = millis();
+          if (g_f_key_event == 1) { uint32_t irq = spin_lock_blocking(res_lock); apple2_warm_reset(); spin_unlock(res_lock, irq); }
+          else if (g_f_key_event == 2) { uint32_t irq = spin_lock_blocking(res_lock); apple2_reset(); spin_unlock(res_lock, irq); req_reload_track0 = true; }
+          else if (g_f_key_event == 3) { if (!g_show_menu) { g_emu_paused = true; req_scan_disks = true; ack_scan_disks = false; g_show_menu = true; tft_dma.fillScreen(0x0000); drawString(30, 30, "SCANNING SD...", 0xFFFF, 0x0000); } else { g_menu_cmd = 4; } }
+          else if (g_f_key_event == 4) { g_joy_mode = !g_joy_mode; updateStatusLine(); }
+          else if (g_f_key_event == 5) { g_speed_idx = (g_speed_idx + 1) % 4; updateStatusLine(); }
+      }
+      g_f_key_event = 0;
   }
-}
+  }
 
 void loop1() {
   g_core1_heartbeat++;
