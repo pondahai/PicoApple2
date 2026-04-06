@@ -24,6 +24,13 @@
     *   搖桿方向與搖桿按鈕維持實體直通 (Zero-buffer)，直接寫入記憶體不受 FIFO 影響。
 *   **成果**: 達成「文字輸入不漏字、搖桿操作零延遲」的完美平衡。
 
+### 4. 變速模擬功能 (Speed Multiplier)
+*   **優化內容**: 
+    *   引入 `g_speed_multipliers` 陣列，支援 x1.0, x1.2, x1.4, x1.5 四種速率。
+    *   新增 `Fn + 5` (F5) 快捷鍵，可即時循環切換模擬速度。
+    *   在畫面下方顯示當前倍率提示。
+*   **成果**: 允許玩家在載入或特定遊戲情境下加速執行。
+
 ---
 
 ## 2026-04-02: SPI Performance Optimization (High Speed Restoration)

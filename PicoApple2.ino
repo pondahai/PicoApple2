@@ -50,6 +50,8 @@ static uint8_t current_buf_idx = 0;
 volatile uint8_t g_key_fifo[KEY_FIFO_SIZE];
 volatile int g_key_head = 0;
 volatile int g_key_tail = 0;
+float g_speed_multipliers[] = {1.0f, 1.2f, 1.4f, 1.5f};
+int g_speed_idx = 0;
 volatile uint8_t g_f_key_event = 0;
 volatile bool g_emu_paused = false;
 volatile bool g_boot_ready = false; 
@@ -463,8 +465,13 @@ void scan_matrix() {
   if (g_f_key_event == 2) { g_f_key_event = 0; uint32_t irq = spin_lock_blocking(res_lock); apple2_reset(); spin_unlock(res_lock, irq); req_reload_track0 = true; }
   if (g_f_key_event == 3) { g_f_key_event = 0; g_emu_paused = true; req_scan_disks = true; ack_scan_disks = false; g_show_menu = true; tft_dma.fillScreen(0x0000); drawString(30, 30, "SCANNING SD...", 0xFFFF, 0x0000); }
   if (g_f_key_event == 4) { g_f_key_event = 0; g_joy_mode = !g_joy_mode; drawString(20, 222, g_joy_mode ? "ARROWS: JOYSTICK" : "ARROWS: KEYBOARD", 0x07E0, 0x0000); }
-}
-
+  if (g_f_key_event == 5) { 
+    g_f_key_event = 0; 
+    g_speed_idx = (g_speed_idx + 1) % 4; 
+    char buf[32]; sprintf(buf, "SPEED: X%.1f", g_speed_multipliers[g_speed_idx]);
+    drawString(20, 222, buf, 0x07E0, 0x0000); 
+  }
+  }
 void loop1() {
   g_core1_heartbeat++;
   unsigned long now = millis();
