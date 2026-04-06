@@ -51,7 +51,7 @@ volatile uint8_t g_key_fifo[KEY_FIFO_SIZE];
 volatile int g_key_head = 0;
 volatile int g_key_tail = 0;
 float g_speed_multipliers[] = {1.0f, 1.2f, 1.4f, 1.5f};
-int g_speed_idx = 0;
+volatile int g_speed_idx = 0;
 volatile uint8_t g_f_key_event = 0;
 volatile bool g_emu_paused = false;
 volatile bool g_boot_ready = false; 
@@ -277,6 +277,7 @@ void loop() {
           else if (strcmp(esc_buf, "[12~") == 0 || strcmp(esc_buf, "OQ") == 0) g_f_key_event = 2;
           else if (strcmp(esc_buf, "[13~") == 0 || strcmp(esc_buf, "OR") == 0) g_f_key_event = 3;
           else if (strcmp(esc_buf, "[15~") == 0 || strcmp(esc_buf, "OS") == 0) g_f_key_event = 4;
+          else if (strcmp(esc_buf, "[17~") == 0) g_f_key_event = 5;
         } else if (esc_buf[0] == 'O') { if (sK == 'P') g_f_key_event = 1; else if (sK == 'Q') g_f_key_event = 2; else if (sK == 'R') g_f_key_event = 3; }
         esc_state = 0;
       }
@@ -334,7 +335,7 @@ void loop() {
   if (reload_track >= 0) { loadSingleTrack((uint8_t)reload_track); }
 
   g_c0_checkpoint = 6; 
-  unsigned long expected = (unsigned long)((float)cycles / 1.023f);
+  unsigned long expected = (unsigned long)((float)cycles / (1.023f * g_speed_multipliers[g_speed_idx]));
   unsigned long actual = micros() - start_t;
   if (expected > actual) {
     unsigned long diff = expected - actual;
@@ -345,6 +346,17 @@ void loop() {
 void drawString(uint16_t x, uint16_t y, String s, uint16_t color, uint16_t bg) {
   const uint8_t* font = apple2_get_char_rom_ptr(); s.toUpperCase(); 
   for (int i = 0; i < s.length(); i++) { tft_dma.drawChar(x + (i * 7), y, s[i], color, bg, font); }
+}
+
+void updateStatusLine() {
+  char buf[64];
+  // 顯示左側：搖桿/鍵盤模式
+  drawString(20, 222, "ARROWS: ", 0x07E0, 0x0000);
+  drawString(76, 222, g_joy_mode ? "JOYSTICK" : "KEYBOARD", 0x0000, 0x07E0);
+  // 顯示中間：模擬速度
+  drawString(135, 222, "SPEED: ", 0x07E0, 0x0000);
+  sprintf(buf, "X%.1f", g_speed_multipliers[g_speed_idx]);
+  drawString(184, 222, buf, 0x0000, 0x07E0);
 }
 
 void drawDiskMenu() {
@@ -390,7 +402,7 @@ void setup1() {
   
   spi_set_baudrate(spi0, 62500000);
   tft_dma.fillScreen(palette[0]);
-  drawString(20, 222, g_joy_mode ? "ARROWS: JOYSTICK" : "ARROWS: KEYBOARD", 0x07E0, 0x0000);
+  updateStatusLine();
   digitalWrite(PIN_DISPLAY_BL, HIGH);
   pinMode(BTN_UP, INPUT_PULLUP); pinMode(BTN_DOWN, INPUT_PULLUP);
   pinMode(BTN_LEFT, INPUT_PULLUP); pinMode(BTN_RIGHT, INPUT_PULLUP);
@@ -449,7 +461,7 @@ void scan_matrix() {
         if (r == 3 && c == 5 || r == 2 && c == 6) continue;
         if (p) {
           uint8_t k = isShiftPressed ? (uint8_t)keymap_shift[r][c] : (uint8_t)keymap_base[r][c];
-          if (isFnPressed && k == '1') g_f_key_event = 1; else if (isFnPressed && (k == '2' || k == '@')) g_f_key_event = 2; else if (isFnPressed && (k == '3' || k == '#')) g_f_key_event = 3; else if (isFnPressed && (k == '4' || k == '$')) g_f_key_event = 4;
+          if (isFnPressed && k == '1') g_f_key_event = 1; else if (isFnPressed && (k == '2' || k == '@')) g_f_key_event = 2; else if (isFnPressed && (k == '3' || k == '#')) g_f_key_event = 3; else if (isFnPressed && (k == '4' || k == '$')) g_f_key_event = 4; else if (isFnPressed && (k == '5' || k == '%')) g_f_key_event = 5;
           else if (isFnPressed && (k == 'c' || k == 'C')) { g_caps_lock = !g_caps_lock; }
           else {
             if (k >= 209 && k <= 214) { if (!g_joy_mode && k <= 212) { if (k == 209) k = 0x0B; else if (k == 210) k = 0x0A; else if (k == 211) k = 0x08; else if (k == 212) k = 0x15; } else k = 0; } else if (k == 203) k = 0x0D; else if (k == 207) k = 0x1B; else if (k == 204) k = 0x08;
@@ -464,14 +476,14 @@ void scan_matrix() {
   if (g_f_key_event == 1) { g_f_key_event = 0; uint32_t irq = spin_lock_blocking(res_lock); apple2_warm_reset(); spin_unlock(res_lock, irq); }
   if (g_f_key_event == 2) { g_f_key_event = 0; uint32_t irq = spin_lock_blocking(res_lock); apple2_reset(); spin_unlock(res_lock, irq); req_reload_track0 = true; }
   if (g_f_key_event == 3) { g_f_key_event = 0; g_emu_paused = true; req_scan_disks = true; ack_scan_disks = false; g_show_menu = true; tft_dma.fillScreen(0x0000); drawString(30, 30, "SCANNING SD...", 0xFFFF, 0x0000); }
-  if (g_f_key_event == 4) { g_f_key_event = 0; g_joy_mode = !g_joy_mode; drawString(20, 222, g_joy_mode ? "ARROWS: JOYSTICK" : "ARROWS: KEYBOARD", 0x07E0, 0x0000); }
+  if (g_f_key_event == 4) { g_f_key_event = 0; g_joy_mode = !g_joy_mode; updateStatusLine(); }
   if (g_f_key_event == 5) { 
     g_f_key_event = 0; 
     g_speed_idx = (g_speed_idx + 1) % 4; 
-    char buf[32]; sprintf(buf, "SPEED: X%.1f", g_speed_multipliers[g_speed_idx]);
-    drawString(20, 222, buf, 0x07E0, 0x0000); 
+    updateStatusLine(); 
   }
-  }
+}
+
 void loop1() {
   g_core1_heartbeat++;
   unsigned long now = millis();
@@ -494,8 +506,8 @@ void loop1() {
     if (req_scan_disks) { if (ack_scan_disks) { req_scan_disks = false; selected_file_idx = 0; if (disk_file_count > 0) drawDiskMenu(); else drawString(30, 50, "NO DSK FILES FOUND", 0xF800, 0x0000); } return; }
     static uint32_t last_m_nav = 0; bool b_u = joy_up || (g_menu_cmd == 1), b_d = joy_down || (g_menu_cmd == 2), b_e = joy_btn0 || (g_menu_cmd == 3), b_q = joy_btn1 || (g_menu_cmd == 4);
     if ((b_u || b_d || b_e || b_q) && millis() - last_m_nav > 200) {
-      if (disk_file_count > 0) { if (b_u) { selected_file_idx = (selected_file_idx - 1 + disk_file_count) % disk_file_count; drawDiskMenu(); } else if (b_d) { selected_file_idx = (selected_file_idx + 1) % disk_file_count; drawDiskMenu(); } else if (b_e) { req_load_disk_idx = selected_file_idx; g_show_menu = false; tft_dma.fillScreen(0); g_last_m_on = -1; g_last_drawn_track = -1; drawString(20, 222, g_joy_mode ? "ARROWS: JOYSTICK" : "ARROWS: KEYBOARD", 0x07E0, 0x0000); } }
-      if (b_q) { g_show_menu = false; g_emu_paused = false; tft_dma.fillScreen(0); g_last_m_on = -1; g_last_drawn_track = -1; drawString(20, 222, g_joy_mode ? "ARROWS: JOYSTICK" : "ARROWS: KEYBOARD", 0x07E0, 0x0000); } last_m_nav = millis(); g_menu_cmd = 0;
+      if (disk_file_count > 0) { if (b_u) { selected_file_idx = (selected_file_idx - 1 + disk_file_count) % disk_file_count; drawDiskMenu(); } else if (b_d) { selected_file_idx = (selected_file_idx + 1) % disk_file_count; drawDiskMenu(); } else if (b_e) { req_load_disk_idx = selected_file_idx; g_show_menu = false; tft_dma.fillScreen(0); g_last_m_on = -1; g_last_drawn_track = -1; updateStatusLine(); } }
+      if (b_q) { g_show_menu = false; g_emu_paused = false; tft_dma.fillScreen(0); g_last_m_on = -1; g_last_drawn_track = -1; updateStatusLine(); } last_m_nav = millis(); g_menu_cmd = 0;
     }    return;
   }
   
