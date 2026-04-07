@@ -69,6 +69,8 @@ The project is split into two main layers:
 | **Fn + 1** | Warm Reset (Ctrl-Reset). |
 | **Fn + 2** | Cold Reset (Reboot). |
 | **Fn + 3** | Disk Menu (F3) — Load `.DSK` files from SD card. |
+| **Fn + 4** | Joy/Key Mode (F4) — Toggle arrow keys between joystick and keyboard. |
+| **Fn + 5** | Cycle Speed (F5) — Switch between 1.0x to 1.5x speed. |
 
 ## 📁 Key Files & Directories
 
