@@ -441,6 +441,27 @@ void scan_matrix() {
   bool raw_right = (digitalRead(BTN_RIGHT) == LOW) || ((g_joy_mode || g_show_menu) && mat_joy_right);
   bool raw_b0 = (digitalRead(BTN_A) == LOW) || mat_joy_btn0;
   bool raw_b1 = (digitalRead(BTN_B) == LOW) || mat_joy_btn1;
+  bool raw_alt = (digitalRead(BTN_ALT) == LOW);
+
+  // BTN_ALT Combo Logic (Fixed Edge Detection)
+  static bool last_raw_b0 = false, last_raw_b1 = false;
+  bool b0_clicked = raw_b0 && !last_raw_b0;
+  bool b1_clicked = raw_b1 && !last_raw_b1;
+  last_raw_b0 = raw_b0; last_raw_b1 = raw_b1;
+
+  if (raw_alt) {
+    if (b1_clicked) { // BTN_ALT + BTN_B -> Toggle ARROWS mode
+      g_joy_mode = !g_joy_mode;
+      updateStatusLine();
+    }
+    if (b0_clicked) { // BTN_ALT + BTN_A -> Cycle SPEED
+      g_speed_idx = (g_speed_idx + 1) % 4;
+      updateStatusLine();
+    }
+    // Suppress regular buttons when ALT is held
+    raw_b0 = false;
+    raw_b1 = false;
+  }
 
   unsigned long now_t = millis();
   static unsigned long hold_up=0, hold_down=0, hold_left=0, hold_right=0, hold_b0=0, hold_b1=0;
