@@ -18,3 +18,8 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+# 嵌入式效能：全程式 LTO + 單一 codegen unit 讓 mem.read/write 等
+# 每條指令呼叫多次的小函式能跨模組 inline
+lto = "fat"
+codegen-units = 1
+opt-level = 3

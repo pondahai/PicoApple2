@@ -49,7 +49,11 @@ impl Apple2Memory {
         }
     }
 
-    pub fn load_rom(&mut self, data: &'static [u8]) { self.rom = data; }
+    pub fn load_rom(&mut self, data: &'static [u8]) {
+        // read() 的 ROM 路徑以 get_unchecked 依賴此長度不變量
+        assert!(data.len() == 12288, "system ROM must be exactly 12KB");
+        self.rom = data;
+    }
 
     pub fn power_on_reset(&mut self) {
         unsafe { (*core::ptr::addr_of_mut!(crate::RAM_48K)).fill(0); }
@@ -70,7 +74,8 @@ impl Apple2Memory {
 
     fn record_bus_access(&mut self) {
         // 移除頻繁的 disk2.tick(1) 呼叫，僅保留週期計數供 paddle 使用
-        if self.cpu_step_audio_active { self.cpu_step_cycle_cursor = self.cpu_step_cycle_cursor.saturating_add(1); }
+        // (wrapping_add 即可：單條指令內的匯流排存取數遠不可能溢位 u32)
+        if self.cpu_step_audio_active { self.cpu_step_cycle_cursor = self.cpu_step_cycle_cursor.wrapping_add(1); }
     }
 }
 
@@ -78,7 +83,8 @@ impl Memory for Apple2Memory {
     fn read(&mut self, addr: u16) -> u8 {
         self.record_bus_access();
         match addr {
-            0x0000..=0xBFFF => unsafe { crate::RAM_48K[addr as usize] },
+            // SAFETY: match arm 保證 addr <= 0xBFFF < 49152，免邊界檢查（最熱路徑）
+            0x0000..=0xBFFF => unsafe { *(core::ptr::addr_of!(crate::RAM_48K) as *const u8).add(addr as usize) },
             0xC000..=0xCFFF => {
                 if addr >= 0xC600 && addr <= 0xC6FF { return self.disk2.rom[(addr & 0xFF) as usize]; }
                 match addr {
@@ -120,7 +126,11 @@ impl Memory for Apple2Memory {
                         (addr - 0xE000) as usize + 8192
                     };
                     if idx < 16384 { unsafe { crate::LC_RAM_16K[idx] } } else { 0xFF }
-                } else { self.rom[(addr - 0xD000) as usize] }
+                } else {
+                    // SAFETY: match arm 保證 addr ∈ [0xD000, 0xFFFF] → idx <= 12287；
+                    // load_rom() 強制 rom.len() == 12288（指令擷取熱路徑，免邊界檢查）
+                    unsafe { *self.rom.get_unchecked((addr - 0xD000) as usize) }
+                }
             }
         }
     }
@@ -128,7 +138,8 @@ impl Memory for Apple2Memory {
     fn write(&mut self, addr: u16, data: u8) {
         self.record_bus_access();
         match addr {
-            0x0000..=0xBFFF => unsafe { crate::RAM_48K[addr as usize] = data; },
+            // SAFETY: match arm 保證 addr <= 0xBFFF < 49152，免邊界檢查（最熱路徑）
+            0x0000..=0xBFFF => unsafe { *(core::ptr::addr_of_mut!(crate::RAM_48K) as *mut u8).add(addr as usize) = data; },
             0xC000..=0xCFFF => {
                 match addr {
                     0xC010 => self.keyboard_latch &= 0x7F,
