@@ -10,6 +10,8 @@ pub extern "C" fn _critical_section_1_0_acquire() -> u8 { 0 }
 pub extern "C" fn _critical_section_1_0_release(_token: u8) {}
 
 pub mod cpu;
+#[cfg(test)]
+mod boot_test;
 pub mod disk2;
 pub mod instructions;
 pub mod machine;

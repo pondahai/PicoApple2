@@ -193,7 +193,7 @@ void loadSingleTrack(uint8_t track) {
   g_emu_paused = false; 
 }
 
-uint16_t get_text_row_addr(uint8_t row) { return ((row & 0x07) << 7) | ((row & 0x18) * 5) | 0x0400; }
+uint16_t get_text_row_addr(uint8_t row, bool page2) { return ((row & 0x07) << 7) | ((row & 0x18) * 5) | (page2 ? 0x0800 : 0x0400); }
 uint16_t get_hires_row_addr(uint8_t row, bool page2) {
   uint16_t base = page2 ? 0x4000 : 0x2000;
   return base | ((row & 0x07) << 10) | ((row & 0x38) << 4) | ((row & 0xC0) >> 1) | ((row & 0xC0) >> 3);
@@ -586,7 +586,7 @@ void loop1() {
               uint16_t* line_ptr = scanline_buffers[current_buf_idx];
               
               if (text_m || (mixed_m && y >= 160)) {
-                uint16_t r_addr = get_text_row_addr(y / 8);
+                uint16_t r_addr = get_text_row_addr(y / 8, page2);
                 for (int col = 0; col < 40; col++) {
                   uint8_t raw = ram[r_addr + col], c_idx = raw & 0x7F; if (raw < 0x80) { if (c_idx < 0x20) c_idx += 0x40; else if (c_idx >= 0x60) c_idx -= 0x40; }
                   bool inv = (raw < 0x40) || (raw < 0x80 && blink_on); uint8_t font = char_rom[c_idx * 8 + (y % 8)];
@@ -603,7 +603,7 @@ void loop1() {
                   }
                 }
               } else {
-                uint16_t r_addr = get_text_row_addr(y / 8); bool lower = (y % 8) < 4;
+                uint16_t r_addr = get_text_row_addr(y / 8, page2); bool lower = (y % 8) < 4;
                 for (int col = 0; col < 40; col++) {
                   uint8_t val = ram[r_addr + col], c_idx = lower ? (val & 0x0F) : (val >> 4);
                   uint16_t color = palette[c_idx & 0x0F]; for (int x = 0; x < 7; x++) { line_ptr[col * 7 + x] = __builtin_bswap16(color); }
