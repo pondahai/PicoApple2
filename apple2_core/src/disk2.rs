@@ -13,7 +13,13 @@ pub struct Disk2 {
     pub cycles_accumulator: u32,
     pub data_latch: u8,
     pub is_dirty: bool,
+    pub motor_off_delay: u32,
+    pub write_mode_used: bool,
 }
+
+// 真實 Disk II 類比板在 $C088 後馬達仍持續旋轉約 1 秒 (約 1.023M cycles)
+// 許多遊戲 loader 依賴這段時間繼續讀取最後幾個磁區
+pub const MOTOR_OFF_DELAY_CYCLES: u32 = 1_023_000;
 
 impl Disk2 {
     pub fn new() -> Self {
@@ -32,6 +38,8 @@ impl Disk2 {
             cycles_accumulator: 0,
             data_latch: 0,
             is_dirty: false,
+            motor_off_delay: 0,
+            write_mode_used: false,
         }
     }
 
@@ -45,7 +53,9 @@ impl Disk2 {
             // 相位捨入補償 (Phase Compensation)
             // 將 CPU 的讀取時刻與磁碟 32-cycle 邊界對齊
             // (必須只在取得有效 Header/Data byte 時才對齊，如果在 BPL 空轉時也重置，會永遠達不到 32 而死鎖)
-            if (val & 0x80) != 0 {
+            // 僅在本次馬達啟動期間用過寫入模式 (Q7) 時才補償：DOS SAVE/INIT 需要對齊，
+            // 但純讀取的 fast loader 依賴嚴格 32-cycle 節奏，補償會把節奏拉長到 ~48 cycles 導致錯位
+            if self.write_mode_used && (val & 0x80) != 0 {
                 if self.cycles_accumulator > 16 {
                     self.cycles_accumulator -= 16;
                 } else {
@@ -90,8 +100,13 @@ impl Disk2 {
                 let on = (switch & 1) != 0;
                 if on != self.phases[phase] { self.phases[phase] = on; self.step_motor(); }
             }
-            0x08 => self.motor_on = false,
-            0x09 => self.motor_on = true,
+            0x08 => {
+                // 不立即停轉：啟動 1 秒延遲倒數，期間磁碟照常供應資料 (模擬類比板延遲)
+                if self.motor_on && self.motor_off_delay == 0 {
+                    self.motor_off_delay = MOTOR_OFF_DELAY_CYCLES;
+                }
+            }
+            0x09 => { self.motor_on = true; self.motor_off_delay = 0; }
             0x0C => self.q6 = false,
             0x0D => self.q6 = true,
             0x0E => self.q7 = false,
@@ -100,6 +115,7 @@ impl Disk2 {
                     self.cycles_accumulator = 0;
                 }
                 self.q7 = true;
+                self.write_mode_used = true;
             }
             _ => {}
         }
@@ -130,6 +146,17 @@ impl Disk2 {
 
     pub fn tick(&mut self, cycles: u32) {
         if self.motor_on {
+            // 馬達停轉倒數 (見 MOTOR_OFF_DELAY_CYCLES)
+            if self.motor_off_delay > 0 {
+                if self.motor_off_delay > cycles {
+                    self.motor_off_delay -= cycles;
+                } else {
+                    self.motor_off_delay = 0;
+                    self.motor_on = false;
+                    self.write_mode_used = false;
+                    return;
+                }
+            }
             self.cycles_accumulator += cycles;
             let mut iters = 0;
             if self.is_disk_loaded {
@@ -161,5 +188,79 @@ impl Disk2 {
     pub fn reset(&mut self) {
         self.motor_on = false; self.current_track = 0; self.is_disk_loaded = false; self.needs_reload = false;
         self.is_dirty = false; self.q6 = false; self.q7 = false; self.byte_index = 0; self.cycles_accumulator = 0;
+        self.motor_off_delay = 0; self.write_mode_used = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Disk2, MOTOR_OFF_DELAY_CYCLES};
+
+    #[test]
+    fn motor_off_spins_down_after_one_second_delay() {
+        let mut d = Disk2::new();
+        d.is_disk_loaded = true;
+        d.write_io(0xC0E9, 0); // motor on
+        assert!(d.motor_on);
+
+        d.read_io(0xC0E8); // motor off (啟動倒數)
+        assert!(d.motor_on, "馬達應在延遲期間繼續旋轉");
+
+        // 延遲期間磁碟仍供應資料
+        d.data_latch = 0xD5;
+        assert_eq!(d.read_io(0xC0EC), 0xD5);
+
+        d.tick(1000);
+        assert!(d.motor_on, "1000 cycles 後仍在延遲期間");
+
+        d.tick(MOTOR_OFF_DELAY_CYCLES);
+        assert!(!d.motor_on, "倒數結束後馬達應停止");
+        assert_eq!(d.motor_off_delay, 0);
+    }
+
+    #[test]
+    fn motor_on_cancels_pending_spin_down() {
+        let mut d = Disk2::new();
+        d.write_io(0xC0E9, 0); // motor on
+        d.read_io(0xC0E8);     // motor off (啟動倒數)
+        d.read_io(0xC0E9);     // motor on (取消倒數)
+        assert_eq!(d.motor_off_delay, 0);
+
+        d.tick(MOTOR_OFF_DELAY_CYCLES * 2);
+        assert!(d.motor_on, "重新啟動後不應再因舊倒數而停轉");
+    }
+
+    #[test]
+    fn phase_compensation_only_applies_after_write_mode_used() {
+        let mut d = Disk2::new();
+        d.is_disk_loaded = true;
+        d.write_io(0xC0E9, 0); // motor on
+
+        // 純讀取 (fast loader 情境)：不得扭曲 32-cycle 節奏
+        d.data_latch = 0xD5;
+        d.cycles_accumulator = 30;
+        assert_eq!(d.read_io(0xC0EC), 0xD5);
+        assert_eq!(d.cycles_accumulator, 30, "未用過寫入模式時不應做相位補償");
+
+        // 用過寫入模式 (DOS SAVE/INIT 情境)：補償啟用
+        d.read_io(0xC0EF); // Q7 = 1
+        d.read_io(0xC0EE); // Q7 = 0
+        d.data_latch = 0xD5;
+        d.cycles_accumulator = 30;
+        assert_eq!(d.read_io(0xC0EC), 0xD5);
+        assert_eq!(d.cycles_accumulator, 14, "寫入模式用過後應維持原本的相位補償行為");
+    }
+
+    #[test]
+    fn spin_down_completion_clears_write_mode_flag() {
+        let mut d = Disk2::new();
+        d.write_io(0xC0E9, 0); // motor on
+        d.read_io(0xC0EF);     // Q7 = 1
+        assert!(d.write_mode_used);
+
+        d.read_io(0xC0E8); // motor off
+        d.tick(MOTOR_OFF_DELAY_CYCLES + 100);
+        assert!(!d.motor_on);
+        assert!(!d.write_mode_used, "停轉後寫入模式標記應清除");
     }
 }

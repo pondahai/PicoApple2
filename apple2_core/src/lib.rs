@@ -193,7 +193,8 @@ pub extern "C" fn apple2_load_track(track: u8, data: *const u8, size: u32) {
             m.mem.disk2.is_disk_loaded = true;
             m.mem.disk2.loaded_track_num = track;
             m.mem.disk2.current_track = track as usize;
-            m.mem.disk2.byte_index = 0; 
+            // 換軌時保留旋轉相位 (真實磁碟換軌時轉盤角度是連續的)，僅做邊界防護
+            m.mem.disk2.byte_index %= 6656;
         }
     }
 }
