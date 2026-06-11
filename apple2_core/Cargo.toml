@@ -5,7 +5,16 @@ edition = "2024"
 
 [lib]
 crate-type = ["staticlib", "rlib"]
+# no_std crate 無法在主機端建置 doctest 用的 unwind 版本
+doctest = false
 
 [dependencies]
 embedded-alloc = "0.6.0"
 critical-section = { version = "1.1", features = ["restore-state-u8"] }
+
+# no_std 不支援 unwind；test profile 會自動忽略此設定，因此 cargo test 仍可在主機端執行
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
