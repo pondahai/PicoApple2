@@ -1,5 +1,21 @@
 # Pico Apple II Emulator - Development Log
 
+## 2026-06-11: Goonies.dsk 終於載入成功（馬達慣性停轉 + 文字頁 2）
+
+### 1. 根因診斷：主機端全系統開機模擬 (boot_test.rs)
+*   **方法**: 新增 `apple2_core/src/boot_test.rs`，以與韌體完全相同的 FFI 流程在電腦上開機 DSK，輸出磁軌載入序列、PC 熱點直方圖、1/4 軌磁頭軌跡、文字畫面與 RAM dump，並可注入搖桿按鈕。
+*   **發現**: 遊戲 loader（自製 RWTS，標記完全標準）每讀**一個磁區**就 `$C088`/`$C089` 關開馬達。舊核心立即停轉 → loader 的轉速偵測（連續讀 `$C08C` 比較）判定磁碟停止 → 每磁區罰等 ~1.5 秒起轉延遲 → 載入看似永遠完成不了。
+*   **修正驗證**: e335cdf 的 1 秒慣性停轉延遲使關卡載入恢復正常速度，模擬中遊戲成功進入純 HIRES 畫面；MASTER.DSK 回歸正常。
+
+### 2. 文字頁 2 渲染支援
+*   **發現**: 遊戲開機後停在「HOLD JOYSTICK...」搖桿校正畫面，文字寫在**文字頁 2 ($0800)**；渲染端過去寫死 $0400，玩家只看到頁 1 的 loader 殘碼亂畫面，誤判為載入失敗。
+*   **修正**: `get_text_row_addr()` 增加 page2 參數（TEXT 與 LORES 模式同步支援）。
+
+### 3. 建置陷阱（重要教訓）
+*   **陷阱 A**: 修正 commit 只存在 origin/main，本機 main 落後 → 本機重編的韌體不含修正。**重編前先 `git pull`**。
+*   **陷阱 B**: Arduino precompiled library 機制優先連結 `Dropbox\Arduino\libraries\Apple2Core\src\cortex-m0plus\libapple2_core.a`（當時為 3/21 舊檔）→ 原始碼再新也連到舊核心。**新 `.a` 必須同步到該庫 `src/` 與 `src/cortex-m0plus/` 兩處**，並可在 `.bin` 中搜尋新版常數（如 0x000F9C18 LE）驗證。
+*   **成果**: 實機燒錄後 goonies.dsk 開機、搖桿校正、關卡載入全數通過 ✅（專案開始以來首次）。
+
 ## 2026-04-03: JIT Rendering Overhaul & Zero-Noise Input (VBLANK Sync)
 
 ### 1. 交錯式光柵同步渲染 (Interlaced VBLANK Sync Rendering)
