@@ -102,13 +102,9 @@ pub extern "C" fn apple2_get_video_mode() -> u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn apple2_get_beam_y() -> u16 {
-    unsafe {
-        if let Some(ref m) = *addr_of_mut!(MACHINE) {
-            // 17030 cycles per frame, 65 cycles per line.
-            return ((m.total_cycles % 17030) / 65) as u16;
-        }
-        0
-    }
+    // Core 1 光柵追逐高頻輪詢：直接讀 Core 0 在 machine.step() 維護的原子值。
+    // (舊版在此做 u64 % / ÷ 並跨核心非原子讀取 total_cycles，既慢又有撕裂風險)
+    BEAM_Y.load(Ordering::Relaxed) as u16
 }
 
 #[unsafe(no_mangle)]

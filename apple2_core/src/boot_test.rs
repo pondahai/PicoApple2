@@ -253,6 +253,43 @@ mod tests {
         }
     }
 
+    /// 效能基準：MASTER.DSK 開機後測量主機端模擬吞吐量（emulated MHz）。
+    /// 跑法：cargo test --release bench_throughput -- --nocapture --test-threads=1 --ignored
+    #[test]
+    #[ignore]
+    fn bench_throughput() {
+        let dsk = fs::read(r"C:\Users\Dell\Downloads\AppleWin1.30.18.0\MASTER.DSK").expect("read dsk");
+        crate::apple2_init();
+        load_track(&dsk, 0);
+
+        // 暖機：跑完 DOS 開機（含磁碟活動）
+        let mut cycles: u64 = 0;
+        while cycles < 12 * 1_020_500 {
+            cycles += crate::apple2_tick() as u64;
+            let t = crate::apple2_needs_disk_reload();
+            if t >= 0 {
+                load_track(&dsk, t as u8);
+            }
+        }
+
+        // 正式量測：純 CPU 迴圈（BASIC 提示符下的 KEYIN 輪詢）
+        const TARGET: u64 = 200_000_000;
+        let start = std::time::Instant::now();
+        let mut bench_cycles: u64 = 0;
+        while bench_cycles < TARGET {
+            bench_cycles += crate::apple2_tick() as u64;
+        }
+        let dt = start.elapsed();
+        let mhz = bench_cycles as f64 / dt.as_secs_f64() / 1_000_000.0;
+        println!(
+            "bench: {} cycles in {:.3}s -> {:.1} emulated MHz ({:.0}x realtime)",
+            bench_cycles,
+            dt.as_secs_f64(),
+            mhz,
+            mhz / 1.0205
+        );
+    }
+
     #[test]
     fn boot_smoke() {
         if let Ok(p) = env::var("BOOT_DSK") {
