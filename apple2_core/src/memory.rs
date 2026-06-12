@@ -38,6 +38,26 @@ unsafe extern "C" { fn arduino_toggle_speaker(); }
 #[unsafe(no_mangle)]
 pub extern "C" fn arduino_toggle_speaker() {}
 
+// 測試用：記錄每次喇叭翻轉的模擬週期時間戳，供音訊時序分析
+#[cfg(test)]
+pub static mut SPEAKER_TOGGLE_CYCLES: [u64; 4096] = [0; 4096];
+#[cfg(test)]
+pub static mut SPEAKER_TOGGLE_COUNT: usize = 0;
+
+#[cfg(test)]
+fn log_speaker_toggle(cycle: u64) {
+    unsafe {
+        let count = *core::ptr::addr_of!(SPEAKER_TOGGLE_COUNT);
+        if count < 4096 {
+            (*core::ptr::addr_of_mut!(SPEAKER_TOGGLE_CYCLES))[count] = cycle;
+            *core::ptr::addr_of_mut!(SPEAKER_TOGGLE_COUNT) = count + 1;
+        }
+    }
+}
+#[cfg(not(test))]
+#[inline(always)]
+fn log_speaker_toggle(_cycle: u64) {}
+
 impl Apple2Memory {
     pub fn new() -> Self {
         Self {
@@ -102,7 +122,11 @@ impl Memory for Apple2Memory {
                         self.lc_write_enable = false; 0
                     }
                     0xC0E0..=0xC0EF => self.disk2.read_io(addr),
-                    0xC030 => { self.speaker = !self.speaker; unsafe { arduino_toggle_speaker(); } 0 }
+                    0xC030 => {
+                        self.speaker = !self.speaker;
+                        log_speaker_toggle(self.cpu_step_cycle_base + self.cpu_step_cycle_cursor as u64);
+                        unsafe { arduino_toggle_speaker(); } 0
+                    }
                     0xC050 => { self.text_mode = false; 0 } 0xC051 => { self.text_mode = true; 0 }
                     0xC052 => { self.mixed_mode = false; 0 } 0xC053 => { self.mixed_mode = true; 0 }
                     0xC054 => { self.page2 = false; 0 } 0xC055 => { self.page2 = true; 0 }
@@ -144,7 +168,11 @@ impl Memory for Apple2Memory {
                 match addr {
                     0xC010 => self.keyboard_latch &= 0x7F,
                     0xC0E0..=0xC0EF => self.disk2.write_io(addr, data),
-                    0xC030 => { self.speaker = !self.speaker; unsafe { arduino_toggle_speaker(); } }
+                    0xC030 => {
+                        self.speaker = !self.speaker;
+                        log_speaker_toggle(self.cpu_step_cycle_base + self.cpu_step_cycle_cursor as u64);
+                        unsafe { arduino_toggle_speaker(); }
+                    }
                     0xC050 => self.text_mode = false, 0xC051 => self.text_mode = true,
                     0xC052 => self.mixed_mode = false, 0xC053 => self.mixed_mode = true,
                     0xC054 => self.page2 = false, 0xC055 => self.page2 = true,

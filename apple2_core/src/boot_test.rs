@@ -290,6 +290,61 @@ mod tests {
         );
     }
 
+    /// 音訊時序分析：開機到 BASIC 提示符後送 Ctrl-G 觸發 ROM BELL（規格 1kHz / 0.1s），
+    /// 檢查喇叭翻轉在「模擬週期域」的間隔是否穩定且接近 1kHz。
+    /// 跑法：cargo test --release bell_timing -- --nocapture --test-threads=1 --ignored
+    #[test]
+    #[ignore]
+    fn bell_timing() {
+        let dsk = fs::read(r"C:\Users\Dell\Downloads\AppleWin1.30.18.0\MASTER.DSK").expect("read dsk");
+        crate::apple2_init();
+        load_track(&dsk, 0);
+
+        // 開機到 ] 提示符
+        let mut cycles: u64 = 0;
+        while cycles < 14 * 1_020_500 {
+            cycles += crate::apple2_tick() as u64;
+            let t = crate::apple2_needs_disk_reload();
+            if t >= 0 {
+                load_track(&dsk, t as u8);
+            }
+        }
+
+        // 清空紀錄，送 Ctrl-G（高位元設定），跑 0.5 秒
+        unsafe {
+            *core::ptr::addr_of_mut!(crate::memory::SPEAKER_TOGGLE_COUNT) = 0;
+        }
+        crate::apple2_handle_key(0x07);
+        let mut bell_cycles: u64 = 0;
+        while bell_cycles < 510_250 {
+            bell_cycles += crate::apple2_tick() as u64;
+        }
+
+        let count = unsafe { *core::ptr::addr_of!(crate::memory::SPEAKER_TOGGLE_COUNT) };
+        let stamps: Vec<u64> = (0..count)
+            .map(|i| unsafe { *(core::ptr::addr_of!(crate::memory::SPEAKER_TOGGLE_CYCLES) as *const u64).add(i) })
+            .collect();
+        assert!(count > 10, "BELL 應產生大量喇叭翻轉，實際 {}", count);
+
+        let mut intervals: Vec<u64> = stamps.windows(2).map(|w| w[1] - w[0]).collect();
+        let first = intervals.first().copied().unwrap_or(0);
+        let min = intervals.iter().min().copied().unwrap_or(0);
+        let max = intervals.iter().max().copied().unwrap_or(0);
+        let mean = intervals.iter().sum::<u64>() as f64 / intervals.len() as f64;
+        intervals.sort_unstable();
+        let median = intervals[intervals.len() / 2];
+        let freq = 1_020_500.0 / (mean * 2.0);
+        let duration_ms = (stamps[count - 1] - stamps[0]) as f64 / 1020.5;
+
+        println!(
+            "BELL: {} toggles over {:.1} ms; half-period cycles: first={} min={} median={} max={} mean={:.1} -> {:.0} Hz square wave",
+            count, duration_ms, first, min, median, max, mean, freq
+        );
+        // 規格：~1kHz、0.1 秒。模擬週期域的間隔應穩定（抖動僅來自 WAIT 引數粒度）
+        assert!((800.0..1300.0).contains(&freq), "BELL 頻率偏離規格: {:.0} Hz", freq);
+        assert!((70.0..160.0).contains(&duration_ms), "BELL 長度偏離規格: {:.1} ms", duration_ms);
+    }
+
     #[test]
     fn boot_smoke() {
         if let Ok(p) = env::var("BOOT_DSK") {
