@@ -371,49 +371,49 @@ impl CPU {
                 let off = self.fetch_byte(mem) as i8;
                 let c = !self.status.c;
                 extra_cycles = self.branch(c, off);
-                if c { 3 } else { 2 }
+                2
             } // BCC
             0xB0 => {
                 let off = self.fetch_byte(mem) as i8;
                 let c = self.status.c;
                 extra_cycles = self.branch(c, off);
-                if c { 3 } else { 2 }
+                2
             } // BCS
             0xF0 => {
                 let off = self.fetch_byte(mem) as i8;
                 let c = self.status.z;
                 extra_cycles = self.branch(c, off);
-                if c { 3 } else { 2 }
+                2
             } // BEQ
             0xD0 => {
                 let off = self.fetch_byte(mem) as i8;
                 let c = !self.status.z;
                 extra_cycles = self.branch(c, off);
-                if c { 3 } else { 2 }
+                2
             } // BNE
             0x10 => {
                 let off = self.fetch_byte(mem) as i8;
                 let c = !self.status.n;
                 extra_cycles = self.branch(c, off);
-                if c { 3 } else { 2 }
+                2
             } // BPL
             0x30 => {
                 let off = self.fetch_byte(mem) as i8;
                 let c = self.status.n;
                 extra_cycles = self.branch(c, off);
-                if c { 3 } else { 2 }
+                2
             } // BMI
             0x50 => {
                 let off = self.fetch_byte(mem) as i8;
                 let c = !self.status.v;
                 extra_cycles = self.branch(c, off);
-                if c { 3 } else { 2 }
+                2
             } // BVC
             0x70 => {
                 let off = self.fetch_byte(mem) as i8;
                 let c = self.status.v;
                 extra_cycles = self.branch(c, off);
-                if c { 3 } else { 2 }
+                2
             } // BVS
 
             // Math: ADC
