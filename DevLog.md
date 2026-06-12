@@ -1,5 +1,22 @@
 # Pico Apple II Emulator - Development Log
 
+## 2026-06-12: 聲音模擬修正——CPU 分支週期 Bug 與 Cycle-Accurate 重放（實機驗證通過 ✅）
+
+### 1. CPU 分支週期重複計算（影響全機時序，不只聲音）
+*   **診斷方法**: 新增 `bell_timing` 測試——開機到 BASIC 後送 Ctrl-G 觸發 ROM BELL，記錄每次 $C030 翻轉的模擬週期時間戳。
+*   **發現**: 半週期 624 cycles（818 Hz），但真實硬體是 ~546（935 Hz）。差值 72 恰等於 WAIT 迴圈每半週期的 taken 分支數 → taken 分支被算成 4 cycles（match arm 回傳 3 又被 `branch()` 加 1），真實 6502 是 3。
+*   **影響**: 所有數週期的程式慢 ~13%——音高低近兩個半音、delay 迴圈拖長、遊戲節奏偏慢。
+*   **修正**: 分支 opcode base 改回 2，taken +1 / 跨頁 +2 由 `branch()` 統一提供。修正後 BELL = 546 cycles / 935 Hz / 102ms，教科書數值。
+
+### 2. 音訊架構：時間戳重放 (Timestamp Replay)
+*   **問題**: 同步 GPIO 翻轉受批次配速（300 指令全速跑 + delayMicroseconds 補差）影響，翻轉在批次窗內被壓縮 → 週期抖動。
+*   **設計**: 核心把翻轉的模擬週期推入 SPSC 環形緩衝（`AUDIO_RING` + `apple2_audio_peek/drop` FFI）；韌體用硬體 alarm 鏈在精確真實時刻重放。固定 4ms 延遲窗吸收批次抖動（模擬恆跑在真實時間之前）；「週期↔真實時間」錨點僅在大漂移（暫停/選單/SD/變速）時重校準。
+*   **踩坑（重要）**: alarm pool 預設建在 Core 0，但 Core 0 在整個模擬批次期間 `spin_lock_blocking` 關中斷 ~1ms → ISR 被擋、堆積翻轉批次尾連發，聽感**比修正前更破**。**alarm pool 必須建在 Core 1**（`setup1()`），其關中斷窗口僅微秒級；跨核排程用 `alarm_pool_add_alarm_in_us` 是安全的。
+*   **結果**: 實機試聽通過——頻率正確且音質清澈（修正前：清澈但偏低 13%；中間版：頻率對但破聲；最終：兩者皆正確）。
+
+### 3. 效能審查（同日稍早，5bf14e1）
+*   移除每指令 u64 `% / ÷`（M0+ 無除法器，軟體除法數百週期）→ 增量光柵計數器；`apple2_get_beam_y()` 改讀 atomic（兼修跨核 u64 撕裂）；RAM/ROM 熱路徑去除邊界檢查；fat LTO + codegen-units=1。主機端基準 +16%（323→375 emulated MHz），M0+ 收益更大。
+
 ## 2026-06-11: Goonies.dsk 終於載入成功（馬達慣性停轉 + 文字頁 2）
 
 ### 1. 根因診斷：主機端全系統開機模擬 (boot_test.rs)
