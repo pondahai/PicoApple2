@@ -32,6 +32,15 @@ pub static mut WRITE_LOG_IDX: usize = 0;
 pub static BEAM_Y: AtomicU32 = AtomicU32::new(0);
 pub static VIDEO_MODE: AtomicU8 = AtomicU8::new(0);
 
+// --- 音訊時間戳環形緩衝 (SPSC) ---
+// $C030 翻轉不再即時敲 GPIO，而是記下「模擬週期時間戳」；
+// 韌體端用硬體 alarm 在精確的真實時間重放，消除批次執行造成的抖動。
+// 寫入端: Core 0 模擬執行緒；讀取端: alarm ISR (peek/drop)。
+pub const AUDIO_RING_SIZE: usize = 1024;
+pub static mut AUDIO_RING: [u32; AUDIO_RING_SIZE] = [0; AUDIO_RING_SIZE];
+pub static AUDIO_HEAD: AtomicU32 = AtomicU32::new(0);
+pub static AUDIO_TAIL: AtomicU32 = AtomicU32::new(0);
+
 static mut MACHINE: Option<Apple2Machine> = None;
 
 const CHAR_ROM: &[u8; 2048] = include_bytes!("apple2_char.rom");
@@ -95,6 +104,39 @@ pub extern "C" fn apple2_get_video_mode() -> u8 {
             if m.mem.page2 { mode |= 0x04; }
             if m.mem.hires_mode { mode |= 0x08; }
             return mode;
+        }
+        0
+    }
+}
+
+/// 查看下一筆喇叭翻轉的模擬週期時間戳（不消耗）。無資料時回傳 false。
+#[unsafe(no_mangle)]
+pub extern "C" fn apple2_audio_peek(out_cycle: *mut u32) -> bool {
+    let tail = AUDIO_TAIL.load(Ordering::Acquire);
+    if tail == AUDIO_HEAD.load(Ordering::Acquire) {
+        return false;
+    }
+    unsafe {
+        *out_cycle = *(addr_of_mut!(AUDIO_RING) as *const u32).add((tail as usize) & (AUDIO_RING_SIZE - 1));
+    }
+    true
+}
+
+/// 消耗一筆喇叭翻轉時間戳（與 apple2_audio_peek 搭配使用）。
+#[unsafe(no_mangle)]
+pub extern "C" fn apple2_audio_drop() {
+    let tail = AUDIO_TAIL.load(Ordering::Relaxed);
+    if tail != AUDIO_HEAD.load(Ordering::Acquire) {
+        AUDIO_TAIL.store(tail.wrapping_add(1), Ordering::Release);
+    }
+}
+
+/// 目前累計模擬週期數的低 32 位（供韌體建立 週期↔真實時間 錨點）。
+#[unsafe(no_mangle)]
+pub extern "C" fn apple2_get_cycle_count() -> u32 {
+    unsafe {
+        if let Some(ref m) = *addr_of_mut!(MACHINE) {
+            return m.total_cycles as u32;
         }
         0
     }

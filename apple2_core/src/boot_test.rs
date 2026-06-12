@@ -310,9 +310,10 @@ mod tests {
             }
         }
 
-        // 清空紀錄，送 Ctrl-G（高位元設定），跑 0.5 秒
-        unsafe {
-            *core::ptr::addr_of_mut!(crate::memory::SPEAKER_TOGGLE_COUNT) = 0;
+        // 清空殘留翻轉，送 Ctrl-G（觸發 ROM BELL），跑 0.5 秒
+        let mut drain = 0u32;
+        while crate::apple2_audio_peek(&mut drain) {
+            crate::apple2_audio_drop();
         }
         crate::apple2_handle_key(0x07);
         let mut bell_cycles: u64 = 0;
@@ -320,10 +321,14 @@ mod tests {
             bell_cycles += crate::apple2_tick() as u64;
         }
 
-        let count = unsafe { *core::ptr::addr_of!(crate::memory::SPEAKER_TOGGLE_COUNT) };
-        let stamps: Vec<u64> = (0..count)
-            .map(|i| unsafe { *(core::ptr::addr_of!(crate::memory::SPEAKER_TOGGLE_CYCLES) as *const u64).add(i) })
-            .collect();
+        // 經由正式的 FFI 環形緩衝取出時間戳（與韌體重放端相同路徑）
+        let mut stamps: Vec<u64> = Vec::new();
+        let mut c = 0u32;
+        while crate::apple2_audio_peek(&mut c) {
+            crate::apple2_audio_drop();
+            stamps.push(c as u64);
+        }
+        let count = stamps.len();
         assert!(count > 10, "BELL 應產生大量喇叭翻轉，實際 {}", count);
 
         let mut intervals: Vec<u64> = stamps.windows(2).map(|w| w[1] - w[0]).collect();
