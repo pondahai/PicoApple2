@@ -32,31 +32,20 @@ pub struct Apple2Memory {
     pub lc_pre_write_switch: u16,
 }
 
-#[cfg(not(test))]
-unsafe extern "C" { fn arduino_toggle_speaker(); }
-#[cfg(test)]
-#[unsafe(no_mangle)]
-pub extern "C" fn arduino_toggle_speaker() {}
-
-// 測試用：記錄每次喇叭翻轉的模擬週期時間戳，供音訊時序分析
-#[cfg(test)]
-pub static mut SPEAKER_TOGGLE_CYCLES: [u64; 4096] = [0; 4096];
-#[cfg(test)]
-pub static mut SPEAKER_TOGGLE_COUNT: usize = 0;
-
-#[cfg(test)]
-fn log_speaker_toggle(cycle: u64) {
-    unsafe {
-        let count = *core::ptr::addr_of!(SPEAKER_TOGGLE_COUNT);
-        if count < 4096 {
-            (*core::ptr::addr_of_mut!(SPEAKER_TOGGLE_CYCLES))[count] = cycle;
-            *core::ptr::addr_of_mut!(SPEAKER_TOGGLE_COUNT) = count + 1;
+// 喇叭翻轉 → 推入時間戳環形緩衝（見 lib.rs AUDIO_RING）。
+// 緩衝滿時丟棄（重放端正常消耗下不會發生：4ms 延遲窗 × 最高翻轉率 ≪ 1024）。
+fn push_speaker_toggle(cycle: u32) {
+    use core::sync::atomic::Ordering;
+    let head = crate::AUDIO_HEAD.load(Ordering::Relaxed);
+    let tail = crate::AUDIO_TAIL.load(Ordering::Acquire);
+    if head.wrapping_sub(tail) < crate::AUDIO_RING_SIZE as u32 {
+        unsafe {
+            *(core::ptr::addr_of_mut!(crate::AUDIO_RING) as *mut u32)
+                .add((head as usize) & (crate::AUDIO_RING_SIZE - 1)) = cycle;
         }
+        crate::AUDIO_HEAD.store(head.wrapping_add(1), Ordering::Release);
     }
 }
-#[cfg(not(test))]
-#[inline(always)]
-fn log_speaker_toggle(_cycle: u64) {}
 
 impl Apple2Memory {
     pub fn new() -> Self {
@@ -79,6 +68,8 @@ impl Apple2Memory {
         unsafe { (*core::ptr::addr_of_mut!(crate::RAM_48K)).fill(0); }
         self.text_mode = true; self.mixed_mode = false; self.page2 = false; self.hires_mode = false;
         self.keyboard_latch = 0; self.speaker = false; self.disk2.reset();
+        // 丟棄殘留的喇叭翻轉，避免重置後播出舊聲音
+        crate::AUDIO_TAIL.store(crate::AUDIO_HEAD.load(core::sync::atomic::Ordering::Acquire), core::sync::atomic::Ordering::Release);
         self.lc_read_enable = false; self.lc_write_enable = false; self.lc_bank2 = true;
         unsafe { crate::RAM_48K[0x03F4] = 0; }
     }
@@ -124,8 +115,8 @@ impl Memory for Apple2Memory {
                     0xC0E0..=0xC0EF => self.disk2.read_io(addr),
                     0xC030 => {
                         self.speaker = !self.speaker;
-                        log_speaker_toggle(self.cpu_step_cycle_base + self.cpu_step_cycle_cursor as u64);
-                        unsafe { arduino_toggle_speaker(); } 0
+                        push_speaker_toggle((self.cpu_step_cycle_base + self.cpu_step_cycle_cursor as u64) as u32);
+                        0
                     }
                     0xC050 => { self.text_mode = false; 0 } 0xC051 => { self.text_mode = true; 0 }
                     0xC052 => { self.mixed_mode = false; 0 } 0xC053 => { self.mixed_mode = true; 0 }
@@ -170,8 +161,7 @@ impl Memory for Apple2Memory {
                     0xC0E0..=0xC0EF => self.disk2.write_io(addr, data),
                     0xC030 => {
                         self.speaker = !self.speaker;
-                        log_speaker_toggle(self.cpu_step_cycle_base + self.cpu_step_cycle_cursor as u64);
-                        unsafe { arduino_toggle_speaker(); }
+                        push_speaker_toggle((self.cpu_step_cycle_base + self.cpu_step_cycle_cursor as u64) as u32);
                     }
                     0xC050 => self.text_mode = false, 0xC051 => self.text_mode = true,
                     0xC052 => self.mixed_mode = false, 0xC053 => self.mixed_mode = true,

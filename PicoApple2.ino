@@ -81,10 +81,66 @@ extern "C" {
   void apple2_load_track(uint8_t track, const uint8_t* data, uint32_t size);
   void apple2_reset();
   void apple2_warm_reset();
-  void arduino_toggle_speaker();
+  bool apple2_audio_peek(uint32_t* out_cycle);
+  void apple2_audio_drop();
+  uint32_t apple2_get_cycle_count();
   void apple2_get_cpu_state(uint16_t* pc, uint8_t* a, uint8_t* x, uint8_t* y, uint8_t* sp, uint8_t* status);
 }
-void arduino_toggle_speaker() { static bool s = false; s = !s; gpio_put(PIN_JACK_SND, s); }
+
+// ============ 音訊時間戳重放 (Cycle-accurate Speaker Replay) ============
+// 核心把每次 $C030 翻轉的「模擬週期」推入環形緩衝；這裡用硬體 alarm 在
+// 精確的真實時間重放 GPIO 翻轉，消除批次執行 (300 指令/批) 造成的時序抖動。
+// 固定延遲 AUDIO_LATENCY_US 確保重放時刻永遠在未來（模擬跑在真實時間之前）。
+#define AUDIO_LATENCY_US 4000
+static volatile uint32_t g_audio_anchor_cycle = 0; // 錨點：此模擬週期 ≈ 彼真實時刻
+static volatile uint32_t g_audio_anchor_us = 0;
+static volatile uint32_t g_audio_us_per_cyc_q16 = 64054; // 65536/1.023 (x1.0)
+static volatile bool g_audio_alarm_armed = false;
+
+static inline uint32_t audioDueUs(uint32_t cyc) {
+  int32_t dc = (int32_t)(cyc - g_audio_anchor_cycle);
+  int32_t dus = (int32_t)(((int64_t)dc * (int32_t)g_audio_us_per_cyc_q16) >> 16);
+  return g_audio_anchor_us + (uint32_t)dus + AUDIO_LATENCY_US;
+}
+
+static int64_t audioAlarmCb(alarm_id_t, void*) {
+  static bool lvl = false;
+  apple2_audio_drop();
+  lvl = !lvl;
+  gpio_put(PIN_JACK_SND, lvl);
+  uint32_t c;
+  if (apple2_audio_peek(&c)) { // 鏈式排程下一筆
+    int32_t dt = (int32_t)(audioDueUs(c) - time_us_32());
+    return (dt < 1) ? -1 : -(int64_t)dt;
+  }
+  g_audio_alarm_armed = false;
+  return 0;
+}
+
+// 每個模擬批次結束後呼叫：維護 週期↔真實時間 錨點，並在 alarm 閒置時啟動重放鏈
+static void audioPump() {
+  g_audio_us_per_cyc_q16 = (uint32_t)(65536.0f / (1.023f * g_speed_multipliers[g_speed_idx]));
+  uint32_t cyc = apple2_get_cycle_count();
+  uint32_t now = time_us_32();
+  int32_t dc = (int32_t)(cyc - g_audio_anchor_cycle);
+  int32_t predicted_us = (int32_t)g_audio_anchor_us + (int32_t)(((int64_t)dc * (int32_t)g_audio_us_per_cyc_q16) >> 16);
+  int32_t err = (int32_t)(now - (uint32_t)predicted_us);
+  // 配速迴圈平時讓週期與真實時間鎖定；僅在大幅漂移（暫停/選單/SD/變速）
+  // 或錨點過舊（避免 32-bit 差值溢位）時重新校準，維持平滑的時間軸
+  if (err > 500 || err < -500 || dc < 0 || dc > (1 << 28)) {
+    g_audio_anchor_cycle = cyc;
+    g_audio_anchor_us = now;
+  }
+  if (!g_audio_alarm_armed) {
+    uint32_t c;
+    if (apple2_audio_peek(&c)) {
+      int32_t dt = (int32_t)(audioDueUs(c) - time_us_32());
+      if (dt < 1) dt = 1;
+      g_audio_alarm_armed = true;
+      add_alarm_in_us(dt, audioAlarmCb, nullptr, true);
+    }
+  }
+}
 
 void pushKey(uint8_t k) {
   if (k == 0) return; 
@@ -339,8 +395,11 @@ void loop() {
   unsigned long actual = micros() - start_t;
   if (expected > actual) {
     unsigned long diff = expected - actual;
-    if (diff < 20000) delayMicroseconds(diff); 
+    if (diff < 20000) delayMicroseconds(diff);
   }
+
+  g_c0_checkpoint = 7;
+  audioPump();
 }
 
 void drawString(uint16_t x, uint16_t y, String s, uint16_t color, uint16_t bg) {
