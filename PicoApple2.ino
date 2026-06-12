@@ -91,7 +91,12 @@ extern "C" {
 // 核心把每次 $C030 翻轉的「模擬週期」推入環形緩衝；這裡用硬體 alarm 在
 // 精確的真實時間重放 GPIO 翻轉，消除批次執行 (300 指令/批) 造成的時序抖動。
 // 固定延遲 AUDIO_LATENCY_US 確保重放時刻永遠在未來（模擬跑在真實時間之前）。
+//
+// 重要：alarm pool 必須建立在 Core 1（見 setup1）。Core 0 在整個模擬批次期間
+// 以 spin_lock_blocking 關閉中斷 (~1ms)，若 ISR 落在 Core 0 會被擋到批次結束
+// 才連發堆積的翻轉（聽感破音）；Core 1 的關中斷窗口僅微秒級。
 #define AUDIO_LATENCY_US 4000
+static alarm_pool_t* g_audio_pool = nullptr; // 由 Core 1 建立，ISR 在 Core 1 執行
 static volatile uint32_t g_audio_anchor_cycle = 0; // 錨點：此模擬週期 ≈ 彼真實時刻
 static volatile uint32_t g_audio_anchor_us = 0;
 static volatile uint32_t g_audio_us_per_cyc_q16 = 64054; // 65536/1.023 (x1.0)
@@ -131,13 +136,13 @@ static void audioPump() {
     g_audio_anchor_cycle = cyc;
     g_audio_anchor_us = now;
   }
-  if (!g_audio_alarm_armed) {
+  if (!g_audio_alarm_armed && g_audio_pool) {
     uint32_t c;
     if (apple2_audio_peek(&c)) {
       int32_t dt = (int32_t)(audioDueUs(c) - time_us_32());
       if (dt < 1) dt = 1;
       g_audio_alarm_armed = true;
-      add_alarm_in_us(dt, audioAlarmCb, nullptr, true);
+      alarm_pool_add_alarm_in_us(g_audio_pool, dt, audioAlarmCb, nullptr, true);
     }
   }
 }
@@ -432,7 +437,10 @@ void drawDiskMenu() {
 }
 
 void setup1() {
-  delay(2000); 
+  delay(2000);
+  // 音訊重放 alarm pool 建在 Core 1：ISR 跟著建立它的核心跑，
+  // 避開 Core 0 模擬批次的長關中斷窗口（見 audioPump 註解）
+  g_audio_pool = alarm_pool_create_with_unused_hardware_alarm(4);
   gpio_init(DATA_OUT_PIN); gpio_set_dir(DATA_OUT_PIN, GPIO_OUT);
   gpio_init(LATCH_PIN); gpio_set_dir(LATCH_PIN, GPIO_OUT);
   gpio_init(CLOCK_PIN); gpio_set_dir(CLOCK_PIN, GPIO_OUT);
