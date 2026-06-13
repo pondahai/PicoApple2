@@ -148,10 +148,14 @@ static void audioPump() {
 }
 
 void pushKey(uint8_t k) {
-  if (k == 0) return; 
+  if (k == 0) return;
   uint32_t irq = spin_lock_blocking(fifo_lock);
   int next = (g_key_head + 1) % KEY_FIFO_SIZE;
-  if (next != g_key_tail) { g_key_fifo[g_key_head] = k; g_key_head = next; }
+  // FIFO 滿時丟棄「最舊」的鍵而非新鍵：真實 Apple II 只有單一 latch、
+  // 最新按鍵覆蓋舊的 (newest-wins)。舊版丟新鍵會造成快速連打某鍵後
+  // 緩衝塞滿、後續其他按鍵被靜默吃掉的阻塞感。
+  if (next == g_key_tail) { g_key_tail = (g_key_tail + 1) % KEY_FIFO_SIZE; }
+  g_key_fifo[g_key_head] = k; g_key_head = next;
   spin_unlock(fifo_lock, irq);
 }
 
