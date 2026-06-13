@@ -222,7 +222,9 @@
                 if (char === '\n' || char === '\r') charCode = 0x0D;
 
                 if (charCode > 0) {
-                    await sendProtocol('K', charCode, 1);
+                    // 'P' = 貼上通道：韌體路由到 FIFO 保序緩衝（與打字的 'K' 即時通道分離），
+                    // 這樣連按鍵盤不會被貼上佇列阻塞、貼上也不會漏字。
+                    await sendProtocol('P', charCode, 1);
                     await sleep(delay);
                 }
             }
