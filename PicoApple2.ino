@@ -46,10 +46,21 @@ spin_lock_t *fifo_lock;
 static uint16_t scanline_buffers[2][280];
 static uint8_t current_buf_idx = 0;
 
-#define KEY_FIFO_SIZE 128
-volatile uint8_t g_key_fifo[KEY_FIFO_SIZE];
-volatile int g_key_head = 0;
-volatile int g_key_tail = 0;
+// 雙通道鍵盤輸入（在源頭由網頁終端分流，見 Apple2Keyboard.html）：
+//
+// (1) 即時鍵 g_pending_key：1-deep 單槽、newest-wins，給「打字 / 連發」用。
+//     真實 Apple II 鍵盤無 type-ahead，連發只會反覆覆蓋此槽，不塞佇列、
+//     不擋其他鍵——即時手感與硬體一致。封包型別 'K'。
+// (2) 貼上鍵 g_paste_fifo：FIFO 佇列、保序不漏字，給「貼上整段文字」用。
+//     貼上是一次大量湧入的離散字元，需要緩衝逐一餵給程式。封包型別 'P'。
+//
+// 餵鍵時 FIFO 優先（讓進行中的貼上完整保序），空了才餵即時槽。
+volatile uint8_t g_pending_key = 0;
+
+#define PASTE_FIFO_SIZE 256
+volatile uint8_t g_paste_fifo[PASTE_FIFO_SIZE];
+volatile int g_paste_head = 0;
+volatile int g_paste_tail = 0;
 float g_speed_multipliers[] = {1.0f, 1.2f, 1.4f, 1.5f};
 volatile int g_speed_idx = 0;
 volatile uint8_t g_f_key_event = 0;
@@ -149,13 +160,19 @@ static void audioPump() {
 
 void pushKey(uint8_t k) {
   if (k == 0) return;
+  // 即時通道：直接覆蓋成最新鍵（無佇列）。連發或快速輸入永遠只保留當下最新鍵。
   uint32_t irq = spin_lock_blocking(fifo_lock);
-  int next = (g_key_head + 1) % KEY_FIFO_SIZE;
-  // FIFO 滿時丟棄「最舊」的鍵而非新鍵：真實 Apple II 只有單一 latch、
-  // 最新按鍵覆蓋舊的 (newest-wins)。舊版丟新鍵會造成快速連打某鍵後
-  // 緩衝塞滿、後續其他按鍵被靜默吃掉的阻塞感。
-  if (next == g_key_tail) { g_key_tail = (g_key_tail + 1) % KEY_FIFO_SIZE; }
-  g_key_fifo[g_key_head] = k; g_key_head = next;
+  g_pending_key = k;
+  spin_unlock(fifo_lock, irq);
+}
+
+void pushPasteKey(uint8_t k) {
+  if (k == 0) return;
+  // 貼上通道：入 FIFO 保序。滿時丟最舊（理論上貼上有節流不會滿，僅防呆）。
+  uint32_t irq = spin_lock_blocking(fifo_lock);
+  int next = (g_paste_head + 1) % PASTE_FIFO_SIZE;
+  if (next == g_paste_tail) { g_paste_tail = (g_paste_tail + 1) % PASTE_FIFO_SIZE; }
+  g_paste_fifo[g_paste_head] = k; g_paste_head = next;
   spin_unlock(fifo_lock, irq);
 }
 
@@ -168,17 +185,19 @@ void pushHardwareKey(uint8_t k) {
 
 uint8_t popKey() {
   uint32_t irq = spin_lock_blocking(fifo_lock);
-  if (g_key_head == g_key_tail) { spin_unlock(fifo_lock, irq); return 0; }
-  uint8_t k = g_key_fifo[g_key_tail];
-  g_key_tail = (g_key_tail + 1) % KEY_FIFO_SIZE;
+  uint8_t k;
+  if (g_paste_head != g_paste_tail) {
+    // 貼上 FIFO 優先：讓進行中的貼上完整保序，不被即時鍵插隊破壞
+    k = g_paste_fifo[g_paste_tail];
+    g_paste_tail = (g_paste_tail + 1) % PASTE_FIFO_SIZE;
+  } else {
+    k = g_pending_key; g_pending_key = 0;
+  }
   spin_unlock(fifo_lock, irq);
   return k;
 }
 bool hasKey() {
-  uint32_t irq = spin_lock_blocking(fifo_lock);
-  bool h = (g_key_head != g_key_tail);
-  spin_unlock(fifo_lock, irq);
-  return h;
+  return (g_paste_head != g_paste_tail) || (g_pending_key != 0);
 }
 const char keymap_base[8][8] = {
   { '1', '3', '5', '7', '9', '-', 206, 204 }, { 'q', 'e', 't', 'u', 'o', '[', 207, '\\' },
@@ -311,7 +330,10 @@ void loop() {
             if (idx == 0) pushKey(0x0B); else if (idx == 1) pushKey(0x0A); else if (idx == 2) pushKey(0x08); else if (idx == 3) pushKey(0x15);     
           }
         } else if (type == 'K' && stat == 1) {          if (g_show_menu) { if (idx == 0x0D) g_menu_cmd = 3; else if (idx == 0x1B) g_menu_cmd = 4; }
-          if (idx == 112) g_f_key_event = 1; else if (idx == 113) g_f_key_event = 2; else if (idx == 114) g_f_key_event = 3; else pushKey(idx); 
+          if (idx == 112) g_f_key_event = 1; else if (idx == 113) g_f_key_event = 2; else if (idx == 114) g_f_key_event = 3; else pushKey(idx);
+        } else if (type == 'P') {
+          // 'P' = 貼上字元，進 FIFO 保序（網頁終端 simulateTyping 送出）
+          pushPasteKey(idx);
         }
         proto_state = 0;
       }
