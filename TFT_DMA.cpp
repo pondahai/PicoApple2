@@ -58,9 +58,13 @@ void TFT_DMA::sendScanlineAsync(const uint16_t* buffer, uint16_t length) {
 }
 
 void TFT_DMA::waitTransferDone() {
-    if (dma_channel_is_busy(_dma_chan)) {
+    if (_dma_chan >= 0 && dma_channel_is_busy(_dma_chan)) {
         dma_channel_wait_for_finish_blocking(_dma_chan);
     }
+    // 關鍵：DMA 完成只代表資料已填入 SPI TX FIFO，移位暫存器可能還在打最後
+    // 幾個 byte。必須等 PL022 的 BSY 清零（移位完成且 FIFO 排空）才能安全送下
+    // 一個命令／拉 CS，否則 command/data 會在 SPI 線上對撞，累積性失步致畫面全白。
+    while (spi_is_busy(_spi)) tight_loop_contents();
 }
 
 void TFT_DMA::setRotation(uint8_t r) {

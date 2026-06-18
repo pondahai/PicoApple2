@@ -667,9 +667,11 @@ void loop1() {
 
   while (next_draw_y <= cpu_y && next_draw_y < 192) {
       if ((next_draw_y % 2 == 0) == is_even_field) {
-          tft_dma.waitTransferDone();
-          
-          static const uint8_t* ram = apple2_get_ram_ptr(); 
+          // 管線重疊：先把這條掃描線算進空閒緩衝（此時上一條的 DMA 仍在排空，
+          // 兩者讀寫不同 buffer 不衝突），等到要送出前才 waitTransferDone。
+          // 回收原本「等完 DMA 才開始運算」的串列損失：每行時間從 運算+DMA
+          // 降到約 max(運算, DMA)+設窗開銷。
+          static const uint8_t* ram = apple2_get_ram_ptr();
           static const uint8_t* char_rom = apple2_get_char_rom_ptr(); 
           uint8_t v_m = apple2_get_video_mode(); 
           
@@ -703,8 +705,9 @@ void loop1() {
                 }
               }
               
+              tft_dma.waitTransferDone(); // 等上一條 DMA 排空後才設窗 + 啟動本條
               tft_dma.startFrame(20, 24 + y, 299, 24 + y);
-              tft_dma.sendScanlineAsync(line_ptr, 280); 
+              tft_dma.sendScanlineAsync(line_ptr, 280);
               current_buf_idx = 1 - current_buf_idx;
           }
       }

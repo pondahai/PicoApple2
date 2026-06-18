@@ -1,5 +1,21 @@
 # Pico Apple II Emulator - Development Log
 
+## 2026-06-18: 顯示管線重疊 + 修掉潛藏的 SPI 排空 Bug（消除動態梳狀，實機驗證通過 ✅）
+
+### 背景：受 SPI/LCD 頻寬限制的隔行渲染
+*   電子束追逐渲染為了在 62.5MHz SPI 下跟上 60Hz，採奇偶場交錯（每場只畫 96/192 行）。因 ILI9341 是保持型面板，兩場疊加**空間解析度是滿的**，代價是每條線實際 30Hz 更新 → **動態畫面出現梳狀 (combing)**。
+
+### 1. 管線重疊（回收被串列化的運算時間）
+*   **問題**: `loop1()` 原本是 `waitTransferDone → 算整條線 → startFrame → 啟動DMA`，掃描線**等 DMA 結束才開始算**，雙緩衝 `scanline_buffers[2]` 形同虛設，每行時間 ≈ 運算 + DMA 相加。
+*   **修正**: 把運算搬到 `waitTransferDone` **之前**，讓本行運算與上一行的 DMA 並行（兩者讀寫不同 buffer，`current_buf_idx` 在送出後才翻，天然不衝突）。每行時間降到約 `max(運算, DMA) + 設窗開銷`。
+*   **成果**: 餘裕足以讓繪製跟上電子束，**動態梳狀消失**。
+
+### 2. 踩坑（重要）：DMA 完成 ≠ SPI 傳輸完成
+*   **症狀**: 重疊後出現①每行末端殘留像素、會慢慢淡去；②**跑久了整片全白、時序錯亂**。
+*   **根因**: `waitTransferDone()` 只 `dma_channel_wait_for_finish_blocking`，那只代表資料填進 SPI TX FIFO，**PL022 移位暫存器可能還在打最後 1~2 byte**。舊碼那段 ~50µs 的整行運算**意外**讓 FIFO 排空，遮住了問題；重疊後 `waitTransferDone` 緊貼 `startFrame`、中間無延遲 → 下一個命令（CASET）在前一行資料還在線上時就送出 → command/data 對撞，累積性失步 → CASET/色彩模式被汙染 → 全白。
+*   **修正**: `waitTransferDone()` 等完 DMA 後，再 `while (spi_is_busy(_spi)) tight_loop_contents();` 等 PL022 `BSY` 清零（移位完成且 FIFO 排空）才返回。代價僅數百奈秒，重疊好處完整保留。
+*   **教訓**: RP2040 上凡是「DMA 餵 SPI → 之後要拉 CS 或送命令」的轉換點，**都必須額外等 `spi_is_busy` 為假**，不能只等 DMA。原本能跑只是被旁邊的耗時運算巧合遮住。
+
 ## 2026-06-12: 聲音模擬修正——CPU 分支週期 Bug 與 Cycle-Accurate 重放（實機驗證通過 ✅）
 
 ### 1. CPU 分支週期重複計算（影響全機時序，不只聲音）
