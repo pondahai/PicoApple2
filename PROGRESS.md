@@ -38,6 +38,7 @@
 1.  **🔍 核心防禦性加固**: 修正 `apple2_core` 中的位元搜尋迴圈，防止 `goonies.dsk` 等異常格式導致系統鎖死。
 2.  **🔍 相位偏移校準**: 在 32-cycle 基礎上實施 `cycles_accumulator` 餘量補償，解決 `SAVE` 與 `INIT HELLO` 驗證失敗問題。
 3.  **🔊 音效強化**: 導入多層級 Apple II 撥放音效演算法優化。
+4.  **🖥️ 髒行偵測 (Dirty-line Detection)**: 顯示管線重疊已消除一般動態梳狀，但**全螢幕捲動**仍受 192 行 SPI 吞吐上限約束（該幀所有行皆變動 → 退化為畫滿）。計畫對螢幕來源 RAM 留 shadow，逐行比對 40 bytes，未變動的行整條跳過不畫（保持型面板自然留存），把省下的頻寬拿去把變動行畫成**逐行 (progressive)** → 變動區零梳狀。需處理邊界：文字反白閃爍翻轉、模式切換/page2 翻頁須強制標髒；全螢幕捲動為最壞情況。詳見 DevLog.md 2026-06-18。
 
 ---
-*最後更新日期：2026-03-28 (Stability Strategy Update)*
+*最後更新日期：2026-06-18 (Video Pipeline Overlap + Dirty-line TODO)*
