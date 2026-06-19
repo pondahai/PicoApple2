@@ -24,6 +24,9 @@ impl Apple2Machine {
 
     pub fn reset(&mut self) {
         self.cpu.reset(&mut self.mem);
+        // total_cycles 歸零後若不排空殘留喇叭翻轉，韌體重放端會在
+        // 「舊大週期戳 → 新小戳」的不連續點換算出錯誤間距，導致 beep 偏低/破音
+        self.mem.reset_audio_io();
         self.total_cycles = 0;
         self.line_cycle = 0;
         self.beam_line = 0;

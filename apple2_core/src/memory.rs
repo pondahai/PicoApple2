@@ -74,6 +74,15 @@ impl Apple2Memory {
         unsafe { crate::RAM_48K[0x03F4] = 0; }
     }
 
+    /// 暖開機（Ctrl+Reset）用：只丟棄殘留的喇叭翻轉並歸零喇叭電位，
+    /// 不清 RAM、不動 $3F4 powerup byte（保留 warm start 語義）。
+    /// 缺了這步，reset 後 total_cycles 跳回 0 而 ring 仍留著舊大週期戳，
+    /// 韌體 audioDueUs 會在不連續點換算出錯誤間距 → beep 音高偏低/破音。
+    pub fn reset_audio_io(&mut self) {
+        self.speaker = false;
+        crate::AUDIO_TAIL.store(crate::AUDIO_HEAD.load(core::sync::atomic::Ordering::Acquire), core::sync::atomic::Ordering::Release);
+    }
+
     pub fn begin_cpu_step(&mut self, cycle_base: u64) { self.cpu_step_cycle_base = cycle_base; self.cpu_step_cycle_cursor = 0; self.cpu_step_audio_active = true; }
     pub fn end_cpu_step(&mut self) { self.cpu_step_audio_active = false; }
     pub fn finalize_cpu_step_cycles(&mut self, total_cycles: u32) {

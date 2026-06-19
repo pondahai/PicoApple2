@@ -350,6 +350,134 @@ mod tests {
         assert!((70.0..160.0).contains(&duration_ms), "BELL 長度偏離規格: {:.1} ms", duration_ms);
     }
 
+    /// 重現 Fn+1(warm) vs Fn+2(cold) reset 後的 beep 音高差異。
+    /// 先開機到 ]，產生一些 beep 把週期推到較大值與留下 ring 殘留，
+    /// 再分別走 warm/cold reset，擷取「韌體重放端實際會看到」的時間戳序列
+    /// （故意不在擷取前排空 ring，以暴露 warm reset 未排空 ring 的問題）。
+    /// 跑法：cargo test --release reset_beep_pitch -- --nocapture --test-threads=1 --ignored
+    #[test]
+    #[ignore]
+    fn reset_beep_pitch() {
+        let dsk = fs::read(r"C:\Users\Dell\Downloads\AppleWin1.30.18.0\MASTER.DSK").expect("read dsk");
+
+        fn boot_to_prompt(dsk: &[u8]) {
+            crate::apple2_init();
+            load_track(dsk, 0);
+            let mut cycles: u64 = 0;
+            while cycles < 14 * 1_020_500 {
+                cycles += crate::apple2_tick() as u64;
+                let t = crate::apple2_needs_disk_reload();
+                if t >= 0 {
+                    load_track(dsk, t as u8);
+                }
+            }
+        }
+
+        fn run_cycles(dsk: &[u8], n: u64) {
+            let mut c: u64 = 0;
+            while c < n {
+                c += crate::apple2_tick() as u64;
+                let t = crate::apple2_needs_disk_reload();
+                if t >= 0 {
+                    load_track(dsk, t as u8);
+                }
+            }
+        }
+
+        fn capture(label: &str) {
+            // 不排空，照韌體 audioPump/alarm 鏈實際消費路徑取出
+            let mut stamps: Vec<u32> = Vec::new();
+            let mut c = 0u32;
+            while crate::apple2_audio_peek(&mut c) {
+                crate::apple2_audio_drop();
+                stamps.push(c);
+            }
+            if stamps.len() < 2 {
+                println!("[{}] toggles={} (不足以分析)", label, stamps.len());
+                return;
+            }
+            // 以「韌體看到的相鄰差值」計算，含 u32 wrap 行為（與重放端一致）
+            let mut iv: Vec<i64> = stamps
+                .windows(2)
+                .map(|w| (w[1].wrapping_sub(w[0])) as i32 as i64)
+                .collect();
+            let neg = iv.iter().filter(|&&d| d <= 0 || d > 50_000).count();
+            iv.sort_unstable();
+            let median = iv[iv.len() / 2];
+            let freq = if median > 0 { 1_020_500.0 / (median as f64 * 2.0) } else { 0.0 };
+            println!(
+                "[{}] toggles={} first_stamp={} last_stamp={} median_half_period={} -> {:.0} Hz  (異常間隔數={})",
+                label, stamps.len(), stamps.first().unwrap(), stamps.last().unwrap(), median, freq, neg
+            );
+        }
+
+        // --- WARM (Fn+1) ---
+        boot_to_prompt(&dsk);
+        run_cycles(&dsk, 200_000); // 推高 total_cycles，可能留下 ring 殘留
+        let warm_stamp_before = { let mut c = 0u32; crate::apple2_audio_peek(&mut c); c };
+        println!("warm: reset 前 ring 殘留首戳={}", warm_stamp_before);
+        crate::apple2_warm_reset();
+        run_cycles(&dsk, 600_000); // 約 0.6s，涵蓋 reset 後的 beep
+        capture("WARM Fn+1");
+
+        // --- COLD (Fn+2) ---
+        boot_to_prompt(&dsk);
+        run_cycles(&dsk, 200_000);
+        crate::apple2_reset();
+        run_cycles(&dsk, 600_000);
+        capture("COLD Fn+2");
+    }
+
+    /// 重現「沒插 SD」時 Fn+1(warm) beep 變低頻：完全不載入任何磁軌，
+    /// 讓 Autostart 嘗試開機失敗，再 warm reset，量測 core 端 beep 的週期間隔。
+    /// 跑法：cargo test --release nosd_beep -- --nocapture --test-threads=1 --ignored
+    #[test]
+    #[ignore]
+    fn nosd_beep() {
+        fn run(n: u64) {
+            let mut c: u64 = 0;
+            while c < n { c += crate::apple2_tick() as u64; }
+        }
+        fn drain() {
+            let mut c = 0u32;
+            while crate::apple2_audio_peek(&mut c) { crate::apple2_audio_drop(); }
+        }
+        fn capture(label: &str, secs: f64) {
+            drain();
+            let mut stamps: Vec<u32> = Vec::new();
+            let total = (secs * 1_020_500.0) as u64;
+            let mut c: u64 = 0;
+            while c < total {
+                c += crate::apple2_tick() as u64;
+                let mut s = 0u32;
+                while crate::apple2_audio_peek(&mut s) { crate::apple2_audio_drop(); stamps.push(s); }
+            }
+            if stamps.len() < 3 {
+                println!("[{}] toggles={} (幾乎沒 beep)", label, stamps.len());
+                return;
+            }
+            let mut iv: Vec<i64> = stamps.windows(2)
+                .map(|w| (w[1].wrapping_sub(w[0])) as i32 as i64)
+                .filter(|&d| d > 0 && d < 200_000)
+                .collect();
+            iv.sort_unstable();
+            let median = iv[iv.len()/2];
+            let min = *iv.first().unwrap();
+            let max = *iv.last().unwrap();
+            let freq = 1_020_500.0 / (median as f64 * 2.0);
+            println!("[{}] toggles={} half-period cyc: min={} median={} max={} -> {:.0} Hz",
+                label, stamps.len(), min, median, max, freq);
+        }
+
+        // 沒 SD：從不載入磁軌
+        crate::apple2_init();
+        println!("--- NO SD (never load any track) ---");
+        run(14 * 1_020_500); // 讓它嘗試開機並卡住
+        capture("NOSD warm-reset beep", 0.6);
+        crate::apple2_warm_reset();
+        capture("NOSD after Fn+1", 0.6);
+    }
+
     #[test]
     fn boot_smoke() {
         if let Ok(p) = env::var("BOOT_DSK") {
