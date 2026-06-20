@@ -1,5 +1,28 @@
 # Pico Apple II Emulator - Development Log
 
+## 2026-06-20: 無碟 beep 變低音根因 + SD 熱插拔支援（實機驗證通過 ✅）
+
+### 背景：另一條與 warm-reset 無關的低音 bug
+*   先前（6/12）修過 warm-reset 漏排空 audio ring 的破音。本次是**獨立的另一條鏈**：沒插 SD 卡時 beep 音高偏低、插卡就正常。兩者共用「現在到底有沒有可用的碟」這個沒人維護的狀態。
+
+### 1. 根因：無碟時 `needs_reload` 卡死 → tick 吞吐崩潰
+*   **診斷方法**: 既有 `bell_timing`/`nosd_beep` 都量在「週期域」，而本 bug 不在週期域（無碟/有碟翻轉在週期域間隔相同），是**真實時間吞吐**問題。新增 `nosd_throughput` 測試，直接量「每次 `apple2_tick()` 呼叫推進幾個週期」。
+*   **發現**: 無碟開機時 Disk II ROM 步進磁頭（曾到 track 1 再回 0）→ `disk2.step_motor` 設 `needs_reload=true`。該旗標只在 `apple2_load_track` 被呼叫時清除；無 `diskFile` 時韌體 `loadSingleTrack` 第一行就 return，**永不清** → `needs_reload` 從第 ~225 次 tick 呼叫起永遠卡 true。而 `apple2_tick` 批次迴圈 `if needs_reload { break }` 於是每次只跑一條指令。
+*   **實測**: bug 原貌平均 **2.8 週期/呼叫**、100% 崩塌；修復後 **825 週期/呼叫** → 吞吐差 **~295 倍**。模擬遠慢於真實時間，cycle-accurate 音訊重放被拖長 → 低音。
+*   **修正**: 把提前 break 條件 gate 成 `is_disk_loaded && needs_reload`（與 `apple2_needs_disk_reload` 一致）——無碟就沒軌可載，跑滿整批才正確。有碟路徑不變（`bell_timing` 仍 935Hz 無回歸）。實機確認無碟/有碟 beep 都正常。
+
+### 2. SD 熱插拔（`apple2_eject` + 軟體輪詢狀態機）
+*   **動機**: 上面只解「開機無碟」。**運行中拔卡會讓 bug 復活**（`is_disk_loaded` 仍 true、換軌時 `needs_reload` 又卡死）。
+*   **核心**: 新增 `apple2_eject()` 清 `is_disk_loaded`+`needs_reload`，讓拔卡回到無媒體狀態、break 持續被 gate 掉。`is_disk_loaded` 成為速度修復與熱插拔狀態機共用的唯一真相。`eject_keeps_throughput` 測試：hot-removal eject 前 2.5、eject 後 824.7 週期/呼叫。
+*   **韌體**: `g_sd_mounted` 旗標；拔卡走惰性（`loadSingleTrack`/`flushDirtyTrack` 存取失敗 → `markSdRemoved`：close + `SD.end` + `apple2_eject`）；插卡走輪詢。本板卡座**無硬體 card-detect**（microSD pin2 DAT3/CD 已接 GPIO13 當 CS），只能軟體偵測。
+
+### 3. 踩坑（重要）：`SD.begin` 不能拿來當「插卡偵測」
+*   **症狀**: 加了輪詢後，**無卡時模擬整個變超慢**，一插卡瞬間恢復正常並開始讀碟。
+*   **根因**: `SD.begin()` 在無卡時卡在 SdFat 的 ACMD41 約 **2 秒**逾時。每 500ms 輪詢 → Core 0 幾乎一直困在 begin 裡。
+*   **修正**: 改用低階 `sdCardProbe()`——SPI1 以 400kHz 送 CMD0，有卡數 byte 內回非 0xFF、無卡持續 0xFF，**~1ms 判定**；確認有卡才走昂貴的 `SD.begin`。並對 SD_MISO 開內部上拉，讓無卡浮接穩定讀 0xFF、避免誤判。
+*   **教訓**: 偵測手段的失敗成本要低。`SD.begin` 兼具偵測與掛載，但 2 秒失敗成本不適合高頻輪詢——偵測與掛載要分開。Core 0 上任何長阻塞都會直接拖垮模擬實時性。
+*   **成果**: 實機三情境（無卡正常速度 / 插卡瞬間掛載讀碟 / 運行中拔卡退片且 beep 不崩）全數通過 ✅。
+
 ## 2026-06-18: 顯示管線重疊 + 修掉潛藏的 SPI 排空 Bug（消除動態梳狀，實機驗證通過 ✅）
 
 ### 背景：受 SPI/LCD 頻寬限制的隔行渲染
