@@ -85,7 +85,12 @@ pub extern "C" fn apple2_tick() -> u32 {
             // 降回 300 條指令以確保鎖定時間不會過長導致 Core 1 等待超時
             for _ in 0..300 {
                 total_cycles += m.step();
-                if m.mem.disk2.needs_reload {
+                // 只在磁碟已載入時才提前讓出批次去服務換軌；否則 needs_reload
+                // 永遠不會被清（韌體無 diskFile 可載），會讓每次 tick 只跑一條
+                // 指令，模擬吞吐崩潰→cycle-accurate beep 被拖慢成低音。
+                // 條件需與 apple2_needs_disk_reload (is_disk_loaded && needs_reload) 一致。
+                // 實測：無碟下此 gate 讓週期/呼叫從 2.8(崩塌) 回到 825(滿批)。
+                if m.mem.disk2.is_disk_loaded && m.mem.disk2.needs_reload {
                     break;
                 }
             }

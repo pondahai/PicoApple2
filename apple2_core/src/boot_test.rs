@@ -478,6 +478,74 @@ mod tests {
         capture("NOSD after Fn+1", 0.6);
     }
 
+    /// 直接量「無碟開機」時的真實時間吞吐：每次 apple2_tick() 呼叫推進幾個週期。
+    /// 韌體 loop 每圈呼叫一次 tick，固定開銷不變，所以「週期/呼叫」∝ 模擬實時速度
+    /// ∝ cycle-accurate beep 的音高。若 needs_reload 卡死，tick 會每次只跑一條指令
+    /// → 週期/呼叫 崩到個位數 → 低音。此測試把該因子量出來，並追蹤 needs_reload。
+    /// 跑法：cargo test --release nosd_throughput -- --nocapture --test-threads=1 --ignored
+    #[test]
+    #[ignore]
+    fn nosd_throughput() {
+        fn disk_state() -> (bool, usize, bool, i32) {
+            unsafe {
+                if let Some(ref m) = *core::ptr::addr_of!(crate::MACHINE) {
+                    let d = &m.mem.disk2;
+                    (d.needs_reload, d.current_track, d.is_disk_loaded, d.current_qtr_track)
+                } else { (false, 0, false, 0) }
+            }
+        }
+
+        crate::apple2_init();
+        println!("--- NO SD throughput (never load any track) ---");
+
+        // 預熱：呼叫固定次數 tick，讓 boot ROM 嘗試開機、步進磁頭。
+        // 每 50_000 次回報一次狀態，觀察 needs_reload 何時卡住、磁頭是否離開 track 0。
+        let warmup_calls = 2_000_000u64;
+        let mut first_reload_at: Option<u64> = None;
+        let mut max_track = 0usize;
+        for i in 0..warmup_calls {
+            crate::apple2_tick();
+            let (nr, ct, _il, _qt) = disk_state();
+            if nr && first_reload_at.is_none() { first_reload_at = Some(i); }
+            if ct > max_track { max_track = ct; }
+            if i % 400_000 == 0 {
+                let cyc = crate::apple2_get_cycle_count();
+                println!("  call {:>9}: needs_reload={} current_track={} total_cyc(u32)={}", i, nr, ct, cyc);
+            }
+        }
+
+        let (nr_final, ct_final, _il, qt_final) = disk_state();
+        println!("預熱結束: needs_reload={} current_track={} qtr_track={} (磁頭曾到達最大軌={})",
+            nr_final, ct_final, qt_final, max_track);
+        match first_reload_at {
+            Some(n) => println!("needs_reload 首次為真 @ 第 {} 次呼叫", n),
+            None => println!("needs_reload 從未為真（磁頭沒離開 track 0）→ 不會崩速"),
+        }
+
+        // 量測：固定呼叫次數，統計週期/呼叫 與「只跑 1 條指令」的崩塌比例。
+        let measure_calls = 500_000u64;
+        let mut total_cyc: u64 = 0;
+        let mut collapsed: u64 = 0; // 單次 <=8 cycles 視為崩塌（只跑一條短指令）
+        for _ in 0..measure_calls {
+            let c = crate::apple2_tick() as u64;
+            total_cyc += c;
+            if c <= 8 { collapsed += 1; }
+        }
+        let avg = total_cyc as f64 / measure_calls as f64;
+        let collapse_pct = collapsed as f64 / measure_calls as f64 * 100.0;
+
+        // 正常滿批(300 指令)約數百週期；崩速時約 2-4 週期。
+        // 把它換算成「相對於正常滿批的音高比例」做為低音程度的估計。
+        println!(
+            "量測 {} 次呼叫: 平均週期/呼叫={:.1}  崩塌(<=8cyc)比例={:.1}%  總週期={}",
+            measure_calls, avg, collapse_pct, total_cyc
+        );
+        println!(
+            ">>> 若此數遠低於滿批(~數百)，即證實無碟崩速 → beep 音高 ∝ {:.1}/滿批",
+            avg
+        );
+    }
+
     #[test]
     fn boot_smoke() {
         if let Ok(p) = env::var("BOOT_DSK") {
