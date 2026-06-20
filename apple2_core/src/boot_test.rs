@@ -546,6 +546,45 @@ mod tests {
         );
     }
 
+    /// 驗證「運行中拔卡」：磁碟已載入(is_disk_loaded=true)時若不服務換軌，needs_reload
+    /// 會卡死、tick 崩速（hot-removal 低音復活）；呼叫 apple2_eject() 後 is_disk_loaded
+    /// 歸 false，break 不再觸發，吞吐恢復滿批。一個測試同時展示 bug 與修復。
+    /// 跑法：cargo test --release eject_keeps_throughput -- --nocapture --test-threads=1 --ignored
+    #[test]
+    #[ignore]
+    fn eject_keeps_throughput() {
+        fn needs_reload() -> bool {
+            unsafe {
+                if let Some(ref m) = *core::ptr::addr_of!(crate::MACHINE) { m.mem.disk2.needs_reload } else { false }
+            }
+        }
+        fn avg_over(calls: u64) -> f64 {
+            let mut total: u64 = 0;
+            for _ in 0..calls { total += crate::apple2_tick() as u64; }
+            total as f64 / calls as f64
+        }
+
+        crate::apple2_init();
+        let dummy = [0u8; 4096];
+        crate::apple2_load_track(0, dummy.as_ptr(), 4096); // is_disk_loaded = true
+
+        // 暖機讓 boot ROM 啟動馬達/步進磁頭，不服務換軌（模擬卡已被拔走）。
+        // 跑到 needs_reload 卡住為止。
+        let mut spun = 0u64;
+        while !needs_reload() && spun < 5_000_000 { crate::apple2_tick(); spun += 1; }
+        assert!(needs_reload(), "暖機後 needs_reload 應為真（磁頭步進觸發）");
+
+        // 控制組：拔卡但「尚未 eject」(is_disk_loaded 仍 true) → 應崩速
+        let before = avg_over(300_000);
+        // 修復：呼叫 eject → is_disk_loaded=false、needs_reload 清除 → 應恢復
+        crate::apple2_eject();
+        let after = avg_over(300_000);
+
+        println!("hot-removal 週期/呼叫: eject前={:.1}  eject後={:.1}", before, after);
+        assert!(before < 20.0, "eject 前應崩速(<20)，實際 {:.1}", before);
+        assert!(after > 100.0, "eject 後應恢復滿批(>100)，實際 {:.1}", after);
+    }
+
     #[test]
     fn boot_smoke() {
         if let Ok(p) = env::var("BOOT_DSK") {

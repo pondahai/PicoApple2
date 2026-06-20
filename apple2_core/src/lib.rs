@@ -247,6 +247,20 @@ pub extern "C" fn apple2_load_track(track: u8, data: *const u8, size: u32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn apple2_load_disk(data: *const u8, size: u32) { apple2_load_track(0, data, size); }
 
+/// 退片：韌體偵測到 SD 卡被拔出（或存取失敗）時呼叫。清掉 is_disk_loaded 與
+/// needs_reload，讓模擬器回到「無媒體」狀態——disk2.tick 餵 0xFF、且 apple2_tick
+/// 的 reload-break 因 is_disk_loaded=false 不再觸發，避免換軌時 needs_reload 卡死
+/// 重演無碟崩速低音。模擬的控制器本身（馬達/相位）不動，等同真實「機內無碟」。
+#[unsafe(no_mangle)]
+pub extern "C" fn apple2_eject() {
+    unsafe {
+        if let Some(ref mut m) = *addr_of_mut!(MACHINE) {
+            m.mem.disk2.is_disk_loaded = false;
+            m.mem.disk2.needs_reload = false;
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn apple2_get_write_log(out_buffer: *mut u8) -> u16 {
     unsafe {

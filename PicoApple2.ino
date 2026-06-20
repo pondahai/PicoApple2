@@ -65,7 +65,8 @@ float g_speed_multipliers[] = {1.0f, 1.2f, 1.4f, 1.5f};
 volatile int g_speed_idx = 0;
 volatile uint8_t g_f_key_event = 0;
 volatile bool g_emu_paused = false;
-volatile bool g_boot_ready = false; 
+volatile bool g_boot_ready = false;
+volatile bool g_sd_mounted = false; // SD 卡是否已掛載且檔案系統可用（熱插拔狀態）
 volatile uint32_t g_core1_heartbeat = 0;
 volatile uint8_t g_c0_checkpoint = 0;
 
@@ -90,6 +91,7 @@ extern "C" {
   uint8_t apple2_get_denibblized_track(uint8_t* out_buffer);
   int32_t apple2_needs_disk_reload();
   void apple2_load_track(uint8_t track, const uint8_t* data, uint32_t size);
+  void apple2_eject();
   void apple2_reset();
   void apple2_warm_reset();
   bool apple2_audio_peek(uint32_t* out_cycle);
@@ -245,6 +247,19 @@ byte myShiftIn(uint8_t dP, uint8_t cP) {
   return data;
 }
 
+// 偵測到 SD 卡被拔出（或存取失敗）：作廢檔案系統並退片，讓模擬器回到無媒體狀態。
+// 退片清掉 is_disk_loaded，避免換軌時 needs_reload 卡死重演無碟崩速低音。
+void markSdRemoved() {
+  if (!g_sd_mounted) return;
+  g_sd_mounted = false;
+  if (diskFile) diskFile.close();
+  SD.end();
+  uint32_t irq = spin_lock_blocking(res_lock);
+  apple2_eject();
+  spin_unlock(res_lock, irq);
+  Serial.println("[SD] Card removed -> ejected");
+}
+
 void flushDirtyTrack() {
   if (!diskFile) return;
   bool is_dirty = false; uint8_t target_track = 0;
@@ -254,10 +269,11 @@ void flushDirtyTrack() {
   spin_unlock(res_lock, irq);
   if (is_dirty) {
     uint32_t offset = (uint32_t)target_track * 4096;
-    if (diskFile.seek(offset)) {
-      size_t written = diskFile.write(track_buffer, 4096); 
+    if (diskFile.seek(offset) && diskFile.write(track_buffer, 4096) == 4096) {
       diskFile.flush();
-      Serial.printf("[SD] Flush Track %d: %d bytes written\n", target_track, written);
+      Serial.printf("[SD] Flush Track %d: 4096 bytes written\n", target_track);
+    } else {
+      markSdRemoved(); // 寫入失敗：dirty 資料遺失（硬拔代價），但避免後續對死卡操作
     }
   }
 }
@@ -273,8 +289,43 @@ void loadSingleTrack(uint8_t track) {
     apple2_load_track(track, track_buffer, 4096);
     last_loaded_track = track;
     spin_unlock(res_lock, irq);
+  } else {
+    markSdRemoved(); // 讀取失敗：判定拔卡，退片（插卡輪詢會在 ~500ms 內自動重掛）
   }
-  g_emu_paused = false; 
+  g_emu_paused = false;
+}
+
+// 掛載成功後：依 LASTDISK.TXT 開啟上次的 disk 映像並載入 track 0。
+// setup1 開機路徑與熱插拔插卡輪詢共用，避免兩處邏輯分歧。
+void openLastDisk() {
+  if (SD.exists("/LASTDISK.TXT")) {
+    File f = SD.open("/LASTDISK.TXT", FILE_READ);
+    if (f) { String path = f.readStringUntil('\n'); path.trim(); if (path.length() > 0 && SD.exists(path)) { g_current_disk_path = path; } f.close(); }
+  }
+  diskFile = SD.open(g_current_disk_path, "r+"); if (!diskFile) diskFile = SD.open(g_current_disk_path, "r");
+  if (diskFile) loadSingleTrack(0);
+}
+
+// 低階快速探卡。SD.begin 在無卡時會卡在 ACMD41 約 2 秒逾時，若用它當輪詢偵測手段，
+// Core 0 會被反覆拖住 → 模擬「超慢」。改先送 CMD0：有卡數 byte 內回應(非 0xFF)、
+// 無卡持續 0xFF，約 1ms 即判定。確認有卡才走昂貴的 SD.begin。
+bool sdCardProbe() {
+  SPI1.setRX(SD_MISO); SPI1.setTX(SD_MOSI); SPI1.setSCK(SD_SCK);
+  gpio_pull_up(SD_MISO); // 偏置 MISO，無卡浮接時穩定讀到 0xFF，避免誤判有卡
+  pinMode(SD_CS, OUTPUT);
+  SPI1.begin();
+  SPI1.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+  digitalWrite(SD_CS, HIGH);
+  for (int i = 0; i < 10; i++) SPI1.transfer(0xFF); // >=74 clocks 讓卡上電
+  digitalWrite(SD_CS, LOW);
+  const uint8_t cmd0[] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95}; // CMD0 + 正確 CRC
+  for (int i = 0; i < 6; i++) SPI1.transfer(cmd0[i]);
+  bool present = false;
+  for (int i = 0; i < 16; i++) { if (SPI1.transfer(0xFF) != 0xFF) { present = true; break; } }
+  digitalWrite(SD_CS, HIGH);
+  SPI1.transfer(0xFF);
+  SPI1.endTransaction();
+  return present;
 }
 
 uint16_t get_text_row_addr(uint8_t row, bool page2) { return ((row & 0x07) << 7) | ((row & 0x18) * 5) | (page2 ? 0x0800 : 0x0400); }
@@ -377,7 +428,25 @@ void loop() {
 
   if (!g_boot_ready) { yield(); return; }
 
-  g_c0_checkpoint = 2; 
+  // 熱插拔：未掛載時每 ~500ms 試掛一次（本板無硬體 card-detect，只能輪詢）。
+  // 拔卡偵測走惰性路徑（loadSingleTrack/flushDirtyTrack 存取失敗 → markSdRemoved）。
+  if (!g_sd_mounted) {
+    static unsigned long last_sd_probe = 0;
+    if (millis() - last_sd_probe > 500) {
+      last_sd_probe = millis();
+      // 先快速探卡再決定是否 begin，避免無卡時 SD.begin 的 2 秒逾時把模擬拖慢
+      if (sdCardProbe()) {
+        SPI1.setRX(SD_MISO); SPI1.setTX(SD_MOSI); SPI1.setSCK(SD_SCK);
+        if (SD.begin(SD_CS, 20000000, SPI1)) {
+          g_sd_mounted = true;
+          Serial.println("[SD] Card inserted -> mounted");
+          openLastDisk(); // 載入 track 0：無碟 boot 迴圈下一次讀取即可開機
+        }
+      }
+    }
+  }
+
+  g_c0_checkpoint = 2;
   if (req_scan_disks && !ack_scan_disks) { scanDiskFiles(); ack_scan_disks = true; }
   if (req_load_disk_idx >= 0) {
     if (disk_file_count > 0 && req_load_disk_idx < disk_file_count) {
@@ -503,14 +572,10 @@ void setup1() {
   pinMode(BTN_MENU, INPUT_PULLUP); pinMode(BTN_ALT, INPUT_PULLUP);
   SPI1.setRX(SD_MISO); SPI1.setTX(SD_MOSI); SPI1.setSCK(SD_SCK);
   if (SD.begin(SD_CS, 20000000, SPI1)) {
-    if (SD.exists("/LASTDISK.TXT")) {
-      File f = SD.open("/LASTDISK.TXT", FILE_READ);
-      if (f) { String path = f.readStringUntil('\n'); path.trim(); if (path.length() > 0 && SD.exists(path)) { g_current_disk_path = path; } f.close(); }
-    }
-    diskFile = SD.open(g_current_disk_path, "r+"); if (!diskFile) diskFile = SD.open(g_current_disk_path, "r");
-    if (diskFile) loadSingleTrack(0);
+    g_sd_mounted = true;
+    openLastDisk();
   }
-  g_boot_ready = true; 
+  g_boot_ready = true;
 }
 
 void scan_matrix() {
