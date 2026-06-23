@@ -61,6 +61,22 @@ mod tests {
         // BOOT_PRESS_BTN=秒數: 模擬在該時刻按住搖桿按鈕 0 半秒
         let press_at: Option<u64> = env::var("BOOT_PRESS_BTN").ok().and_then(|s| s.parse().ok());
 
+        // BOOT_TYPE/BOOT_TYPE_AT: 開機後逐字餵鍵（\r=Return），等待程式取走每個 strobe。
+        let type_keys: Vec<u8> = env::var("BOOT_TYPE").ok().map(|s| {
+            let mut out = Vec::new();
+            let mut it = s.chars().peekable();
+            while let Some(c) = it.next() {
+                match c {
+                    '\\' => match it.next() { Some('r') | Some('n') => out.push(0x0D), Some(o) => out.push(o as u8), None => {} },
+                    '^' => { if let Some(k) = it.next() { out.push((k.to_ascii_uppercase() as u8) & 0x1F); } }
+                    _ => out.push(c as u8),
+                }
+            }
+            out
+        }).unwrap_or_default();
+        let type_at_cycle: u64 = (env::var("BOOT_TYPE_AT").ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) * 1_020_500.0) as u64;
+        let mut type_idx = 0usize;
+
         while cycles < target {
             cycles += crate::apple2_tick() as u64;
             if let Some(at) = press_at {
@@ -74,6 +90,10 @@ mod tests {
                     crate::apple2_set_paddle(0, px);
                     crate::apple2_set_paddle(1, py);
                 }
+            }
+            if cycles >= type_at_cycle && type_idx < type_keys.len() && crate::apple2_is_ready_for_key() {
+                crate::apple2_handle_key(type_keys[type_idx] & 0x7F);
+                type_idx += 1;
             }
             let t = crate::apple2_needs_disk_reload();
             if t >= 0 {
@@ -99,6 +119,18 @@ mod tests {
             }
         }
 
+        // BOOT_DUMP=start,len (hex): hex-dump a RAM range for cross-emulator diffing.
+        if let Ok(spec) = env::var("BOOT_DUMP") {
+            let parts: Vec<usize> = spec.split(',').filter_map(|s| usize::from_str_radix(s.trim(), 16).ok()).collect();
+            if let [start, len] = parts[..] {
+                let ram = crate::apple2_get_ram_ptr();
+                for i in 0..len {
+                    if i % 16 == 0 { std::print!("\n  {:04X}:", start + i); }
+                    std::print!(" {:02X}", unsafe { *ram.add((start + i) & 0xFFFF) });
+                }
+                println!();
+            }
+        }
         println!(
             "track load sequence ({}): {:?}",
             track_loads.len(),
