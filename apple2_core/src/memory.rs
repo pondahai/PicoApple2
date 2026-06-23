@@ -97,6 +97,105 @@ impl Apple2Memory {
         // (wrapping_add 即可：單條指令內的匯流排存取數遠不可能溢位 u32)
         if self.cpu_step_audio_active { self.cpu_step_cycle_cursor = self.cpu_step_cycle_cursor.wrapping_add(1); }
     }
+
+    /// 影像掃描器在指定 CPU cycle 從 RAM 抓取的位址。
+    /// 移植自 AppleWin `VideoGetScannerAddress`(Jim Sather《Understanding
+    /// the Apple IIe》第 5 章模型）。NTSC:65 horizontal clocks/掃描線、262
+    /// 線/frame。掃描器在 HBL/VBL 期間仍持續產生位址 —— 這正是 floating bus
+    /// 能當亂數源的原因:其值隨光束位置變動,逐次讀取皆不同。
+    fn video_scanner_address(&self, cycle: u64) -> u16 {
+        const H_CLOCKS: u64 = 65;
+        const H_PE_CLOCK: u64 = 40;
+        const H_PRESET_CLOCK: u64 = 41;
+        const H_CLOCK0_STATE: i32 = 0x18;
+        const V_LINE0_STATE: i32 = 0x100;
+        const V_PRESET_LINE: u64 = 256;
+        const SCAN_LINES: u64 = 262; // NTSC
+        const SCAN_CYCLES: u64 = SCAN_LINES * H_CLOCKS;
+
+        let n_cycles = cycle % SCAN_CYCLES;
+
+        // 水平計數器狀態 (h_0..h_5)
+        let n_hclock = (n_cycles + H_PE_CLOCK) % H_CLOCKS;
+        let mut n_hstate = H_CLOCK0_STATE + n_hclock as i32;
+        if n_hclock >= H_PRESET_CLOCK { n_hstate -= 1; }
+        let h_0 = (n_hstate >> 0) & 1;
+        let h_1 = (n_hstate >> 1) & 1;
+        let h_2 = (n_hstate >> 2) & 1;
+        let h_3 = (n_hstate >> 3) & 1;
+        let h_4 = (n_hstate >> 4) & 1;
+        let h_5 = (n_hstate >> 5) & 1;
+
+        // 垂直計數器狀態 (v_a..v_4)
+        let n_vline = n_cycles / H_CLOCKS;
+        let mut n_vstate = V_LINE0_STATE + n_vline as i32;
+        if n_vline >= V_PRESET_LINE { n_vstate -= SCAN_LINES as i32; }
+        let v_a = (n_vstate >> 0) & 1;
+        let v_b = (n_vstate >> 1) & 1;
+        let v_c = (n_vstate >> 2) & 1;
+        let v_0 = (n_vstate >> 3) & 1;
+        let v_1 = (n_vstate >> 4) & 1;
+        let v_2 = (n_vstate >> 5) & 1;
+        let v_3 = (n_vstate >> 6) & 1;
+        let v_4 = (n_vstate >> 7) & 1;
+
+        let mut hires = self.hires_mode && !self.text_mode;
+        let page2 = self.page2;
+        // 80STORE 是 //e 功能,II/II+ 永遠為 off。
+        if hires && self.mixed_mode && v_4 != 0 && v_2 != 0 { hires = false; }
+
+        // Sather 的 4-bit「sum」,構成位址 bit A3..A6。
+        let addend0 = 0x0D;
+        let addend1 = (h_5 << 2) | (h_4 << 1) | (h_3 << 0);
+        let addend2 = (v_4 << 3) | (v_3 << 2) | (v_4 << 1) | (v_3 << 0);
+        let sum = (addend0 + addend1 + addend2) & 0x0F;
+
+        let mut addr_h: u16 = 0;
+        addr_h |= (h_0 as u16) << 0;
+        addr_h |= (h_1 as u16) << 1;
+        addr_h |= (h_2 as u16) << 2;
+        addr_h |= (sum as u16) << 3;
+        if !hires {
+            // Apple II/II+:HBL 期間 text/lores 掃描器定址 $1000/$1800 區。
+            if h_5 == 0 && (h_4 == 0 || h_3 == 0) { addr_h |= 1 << 12; }
+        }
+
+        let mut addr_v: u16 = 0;
+        addr_v |= (v_0 as u16) << 7;
+        addr_v |= (v_1 as u16) << 8;
+        addr_v |= (v_2 as u16) << 9;
+
+        // 80STORE off:p2a 選 page 1,p2b 選 page 2。
+        let p2a = if !page2 { 1u16 } else { 0 };
+        let p2b = if page2 { 1u16 } else { 0 };
+
+        let mut addr_p: u16 = 0;
+        if hires {
+            addr_v |= (v_a as u16) << 10;
+            addr_v |= (v_b as u16) << 11;
+            addr_v |= (v_c as u16) << 12;
+            addr_p |= p2a << 13; // $2000
+            addr_p |= p2b << 14; // $4000
+        } else {
+            addr_p |= p2a << 10; // $0400
+            addr_p |= p2b << 11; // $0800
+        }
+
+        addr_p | addr_v | addr_h
+    }
+
+    /// 讀取未驅動 `$C0xx` 時看到的值:影像掃描器這個 cycle 正在抓的位元組。
+    /// 遊戲(如《德軍總部》)以此為唯一硬體亂數源 —— 爆炸白雜訊與中彈/穿透判定
+    /// 都靠它。回傳常數會讓雜訊塌成單音、讓每次判定落同一邊。
+    #[inline]
+    fn floating_bus(&self) -> u8 {
+        let cycle = self.cpu_step_cycle_base + self.cpu_step_cycle_cursor as u64;
+        let addr = self.video_scanner_address(cycle) as usize;
+        // 所有掃描位址都落在 48K 主記憶體內;保險起見仍做邊界檢查。
+        if addr < 49152 {
+            unsafe { *(core::ptr::addr_of!(crate::RAM_48K) as *const u8).add(addr) }
+        } else { 0 }
+    }
 }
 
 impl Memory for Apple2Memory {
@@ -117,20 +216,21 @@ impl Memory for Apple2Memory {
                             let sw = 0xC080 | (addr & 0x000B);
                             if self.lc_pre_write_switch == sw { self.lc_write_enable = true; }
                             self.lc_pre_write_switch = sw;
-                            return 0; // 阻止 clear_pre_write
+                            return self.floating_bus(); // 阻止 clear_pre_write;讀取浮空
                         }
-                        self.lc_write_enable = false; 0
+                        self.lc_write_enable = false; self.floating_bus()
                     }
                     0xC0E0..=0xC0EF => self.disk2.read_io(addr),
                     0xC030 => {
                         self.speaker = !self.speaker;
                         push_speaker_toggle((self.cpu_step_cycle_base + self.cpu_step_cycle_cursor as u64) as u32);
-                        0
+                        // 讀取同時 click 喇叭並回傳 floating bus;雜訊程式在此計時迴圈取亂數
+                        self.floating_bus()
                     }
-                    0xC050 => { self.text_mode = false; 0 } 0xC051 => { self.text_mode = true; 0 }
-                    0xC052 => { self.mixed_mode = false; 0 } 0xC053 => { self.mixed_mode = true; 0 }
-                    0xC054 => { self.page2 = false; 0 } 0xC055 => { self.page2 = true; 0 }
-                    0xC056 => { self.hires_mode = false; 0 } 0xC057 => { self.hires_mode = true; 0 }
+                    0xC050 => { self.text_mode = false; self.floating_bus() } 0xC051 => { self.text_mode = true; self.floating_bus() }
+                    0xC052 => { self.mixed_mode = false; self.floating_bus() } 0xC053 => { self.mixed_mode = true; self.floating_bus() }
+                    0xC054 => { self.page2 = false; self.floating_bus() } 0xC055 => { self.page2 = true; self.floating_bus() }
+                    0xC056 => { self.hires_mode = false; self.floating_bus() } 0xC057 => { self.hires_mode = true; self.floating_bus() }
                     0xC061 => if self.pushbuttons[0] { 0x80 } else { 0x00 },
                     0xC062 => if self.pushbuttons[1] { 0x80 } else { 0x00 },
                     0xC064..=0xC067 => {
@@ -138,7 +238,8 @@ impl Memory for Apple2Memory {
                         if el < (8 + (self.paddles[(addr - 0xC064) as usize] as u64 * 11)) { 0x80 } else { 0x00 }
                     }
                     0xC070 => { self.paddle_latch_cycle = self.cpu_step_cycle_base + self.cpu_step_cycle_cursor as u64; 0 }
-                    _ => 0,
+                    // 其餘未驅動 I/O 讀取走 floating bus。
+                    _ => self.floating_bus(),
                 }
             }
             0xD000..=0xFFFF => {
