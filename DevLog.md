@@ -1,5 +1,11 @@
 # Pico Apple II Emulator - Development Log
 
+## 2026-06-24: 上電延遲改為「有上限輪詢」+ 燒錄/編譯流程備忘（實機燒錄通過 ✅）
+
+*   **改動**: 把 Core 0 serial 與 Core 1 開頭兩段 `delay(2000)` 盲等改成 **bounded poll**（輪詢 + 2 秒上限）。新增 `g_core0_ready`：Core 0 完成 `apple2_init()` 後置 true，Core 1 輪詢它放行。最壞情況等同舊行為（零回歸），正常情況省下大半開機等待。serial 那段務必保留上限——無上限的 `while(!Serial)` 會讓獨立開機卡死。
+*   **流程備忘（重要，省 token）**: 詳見 `DevLog_Entry_2026-06-24.md` 第 3 節。重點：①`build_env.bat` 變數持久可直接讀（別重跑 `scan_env.ps1`，`-ExecutionPolicy Bypass` 會被擋）；②只驗證編譯就手動跑 cargo→copy .a→arduino-cli compile，**別整支跑 `full_build.bat`**（會上傳+`pause` 卡住）；③燒錄前先進 BOOTSEL——`picotool reboot -f -u` 回 255 也可能已生效（看 COM port 是否消失 + `picotool info` exit 0），備援是對 COM14 開 1200bps；Pico 本機 serial 在 **COM14**。
+*   **成果**: Rust + Arduino 編譯 exit 0（Flash 8% / RAM 38%）；`picotool load -x` 燒錄並自動重啟運行 ✅。
+
 ## 2026-06-20: 無碟 beep 變低音根因 + SD 熱插拔支援（實機驗證通過 ✅）
 
 ### 背景：另一條與 warm-reset 無關的低音 bug

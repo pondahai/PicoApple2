@@ -66,6 +66,7 @@ volatile int g_speed_idx = 0;
 volatile uint8_t g_f_key_event = 0;
 volatile bool g_emu_paused = false;
 volatile bool g_boot_ready = false;
+volatile bool g_core0_ready = false; // Core 0 已完成序列埠與 apple2_init()，Core 1 等此旗標再操作硬體
 volatile bool g_sd_mounted = false; // SD 卡是否已掛載且檔案系統可用（熱插拔狀態）
 volatile uint32_t g_core1_heartbeat = 0;
 volatile uint8_t g_c0_checkpoint = 0;
@@ -350,7 +351,11 @@ void scanDiskFiles() {
 
 void setup() {
   set_sys_clock_khz(250000, true);
-  Serial.begin(115200); delay(2000);
+  Serial.begin(115200);
+  // 等 USB CDC 列舉，但設 2 秒上限：接電腦時序列埠一好就走，
+  // 獨立開機（無 host）時最多等 2 秒即放行，不會卡死。
+  uint32_t t0 = millis();
+  while (!Serial && millis() - t0 < 2000) { tight_loop_contents(); }
   watchdog_enable(8000, 1);
   int lock_num = spin_lock_claim_unused(true);
   res_lock = spin_lock_init(lock_num);
@@ -358,6 +363,7 @@ void setup() {
   uint32_t irq = spin_lock_blocking(res_lock);
   apple2_init();
   spin_unlock(res_lock, irq);
+  g_core0_ready = true; // 放行 Core 1 開始顯示器/SD 初始化
 }
 
 void loop() {
@@ -532,7 +538,11 @@ void drawDiskMenu() {
 }
 
 void setup1() {
-  delay(2000);
+  // 等 Core 0 完成序列埠與 apple2_init()，再開始操作顯示器/SD。
+  // 取代原本盲等的 delay(2000)：Core 0 一就緒就放行（通常數 ms），
+  // 2 秒上限保證最壞情況不比舊行為差。
+  uint32_t t0 = millis();
+  while (!g_core0_ready && millis() - t0 < 2000) { tight_loop_contents(); }
   // 音訊重放 alarm pool 建在 Core 1：ISR 跟著建立它的核心跑，
   // 避開 Core 0 模擬批次的長關中斷窗口（見 audioPump 註解）
   g_audio_pool = alarm_pool_create_with_unused_hardware_alarm(4);
