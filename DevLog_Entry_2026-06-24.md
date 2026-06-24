@@ -156,3 +156,13 @@ y=228 每列 12px **只容 ~13 列**;超過就畫到框外、選到也看不到�
 - zip 讀取取首個項目(多檔 zip 以第一個為準)。
 - 輔助腳本:`scripts/archive_proto.py`(framing 原型驗證)、`scripts/test_archive.c`
   (codec host 測試)、`scripts/_build_test.bat`、`scripts/_compile_only.bat`。
+
+## 📁 待辦:F3 選單資料夾結構(尚未實作)
+目前選單只掃 SD **根目錄**,不支援子資料夾。已規劃但尚未做:
+- 操作:**右鍵/Enter 進資料夾、左鍵回上層**;檔案上 Enter = 載入。
+- 基礎已備:選單改為「按需讀目錄」後,把掃描目標從固定 `/` 換成可變 `g_menu_dir` 即可;
+  目錄項以 `isDirectory()` 標記並在清單區分顯示。
+- 待接輸入(選單模式左右鍵目前未用):`mat_joy_left/right`、序列 `J idx 2/3`、
+  ANSI `ESC[C/D` → 轉新的 `g_menu_cmd`。
+- 注意:載入路徑改 `g_menu_dir + name`;`WORK_DSK`/`REPACK_TMP` 維持根目錄。
+- 詳見 PROGRESS.md「近期計畫」第 0 項。

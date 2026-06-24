@@ -38,6 +38,11 @@
 ---
 
 ## 📅 近期計畫 (Next Steps)
+0.  **📁 F3 選單資料夾結構 (未實作)**: 目前選單只掃 SD **根目錄**，不進子資料夾。計畫加入瀏覽：
+    - 操作：**右鍵/Enter 進入資料夾、左鍵回上一層**；檔案上 Enter = 載入。
+    - 基礎已備妥：選單已改為「按需讀目錄」(core0 `scanDiskFiles`/`fillDiskWindow`/`findDiskNameByIndex`)，把掃描目標從固定 `/` 改成可變的 `g_menu_dir` 即可；目錄項需以 `isDirectory()` 標記並在清單中區分顯示 (如 `[DIR]`/`name/`)。
+    - 要接的輸入(選單模式下左右鍵目前未用)：實體搖桿 `mat_joy_left/right`、序列協定 `J idx 2/3`、ANSI 方向鍵 `ESC[C/D` → 各自轉成新的 `g_menu_cmd`。
+    - 注意：載入路徑改用 `g_menu_dir + name`；`WORK_DSK`/`REPACK_TMP` 維持在根目錄；`entry.name()` 為基本檔名需自行組完整路徑。
 1.  **🔍 核心防禦性加固**: 修正 `apple2_core` 中的位元搜尋迴圈，防止 `goonies.dsk` 等異常格式導致系統鎖死。
 2.  **🔍 相位偏移校準**: 在 32-cycle 基礎上實施 `cycles_accumulator` 餘量補償，解決 `SAVE` 與 `INIT HELLO` 驗證失敗問題。
 3.  **🔊 音效強化**: 導入多層級 Apple II 撥放音效演算法優化。
