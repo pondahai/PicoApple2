@@ -7,6 +7,7 @@
 #include "hardware/clocks.h"
 #include "hardware/watchdog.h"
 #include "TFT_DMA.h"
+#include "disk_archive.h"
 
 #define PIN_DISPLAY_SCK  18
 #define PIN_DISPLAY_MOSI 19
@@ -217,16 +218,30 @@ const char keymap_shift[8][8] = {
 };
 
 File diskFile;
-uint8_t track_buffer[4096]; 
+uint8_t track_buffer[4096];
 uint8_t last_loaded_track = 0;
-String g_current_disk_path = "/MASTER.DSK";
+String g_current_disk_path = "/MASTER.DSK";   // file the track engine reads/writes (work dsk if archived)
+// Compressed-disk support: when the loaded disk came from a .gz/.zip, it is
+// decompressed to WORK_DSK and the engine runs against that; g_archive_src
+// holds the original archive path so changes can be repacked on disk-swap.
+#define WORK_DSK "/_WORK.DSK"
+String g_archive_src = "";        // original .gz/.zip path, or "" for a plain .dsk
+int    g_archive_kind = ARC_RAW;  // ARC_GZ / ARC_ZIP when g_archive_src set
+bool   g_archive_dirty = false;   // a track was written to the work dsk since last repack
 bool g_show_menu = false;
 bool g_joy_mode = true;
 int g_last_m_on = -1;
 int g_last_drawn_track = -1;
-String disk_files[20]; 
-int disk_file_count = 0;
-int selected_file_idx = 0;
+#define MENU_VISIBLE_ROWS 13   // 清單可視列數：y 65..228 / 12px
+// 清單不在 RAM 全存（檔案數無上限）：core0 按需把「目前可視頁」的檔名讀進 disk_window，
+// core1 只負責繪製。兩核透過 req_menu_fill / menu_fill_done 交握，SD 存取維持 core0 專屬。
+String disk_window[MENU_VISIBLE_ROWS];
+int  disk_file_count = 0;            // 目錄內可載入磁碟檔總數（core0 掃描得出）
+int  selected_file_idx = 0;          // 全域選取 index（0..count-1）
+int  menu_scroll = 0;                // 可視頁第一筆的全域 index
+volatile int  disk_window_base = 0;  // disk_window[] 目前對應的起始 index（core0 設）
+volatile int  req_menu_fill = -1;    // core1→core0：請填從此 index 起的可視頁
+volatile bool menu_fill_done = false;// core0→core1：可視頁已就緒，可繪製
 volatile uint8_t g_menu_cmd = 0;
 
 volatile bool req_scan_disks = false;
@@ -272,6 +287,7 @@ void flushDirtyTrack() {
     uint32_t offset = (uint32_t)target_track * 4096;
     if (diskFile.seek(offset) && diskFile.write(track_buffer, 4096) == 4096) {
       diskFile.flush();
+      if (g_archive_src.length()) g_archive_dirty = true; // work dsk diverged from archive
       Serial.printf("[SD] Flush Track %d: 4096 bytes written\n", target_track);
     } else {
       markSdRemoved(); // 寫入失敗：dirty 資料遺失（硬拔代價），但避免後續對死卡操作
@@ -296,15 +312,54 @@ void loadSingleTrack(uint8_t track) {
   g_emu_paused = false;
 }
 
+// 開啟使用者選的磁碟路徑：純 .dsk 直接開；.gz/.zip 先解壓到 WORK_DSK 再開該檔，
+// 並記住原壓縮檔路徑 (g_archive_src) 以便換片時回壓。回傳 diskFile 是否開啟成功。
+bool openDiskByPath(const String& path) {
+  if (diskFile) diskFile.close();
+  int kind = archive_kind(path.c_str());
+  if (kind == ARC_GZ || kind == ARC_ZIP) {
+    Serial.printf("[ARC] Decompressing %s -> %s\n", path.c_str(), WORK_DSK);
+    if (!archive_extract(path.c_str(), WORK_DSK, kind)) {
+      Serial.println("[ARC] Decompress FAILED");
+      g_archive_src = ""; g_archive_kind = ARC_RAW; g_archive_dirty = false;
+      return false;
+    }
+    g_archive_src = path; g_archive_kind = kind; g_archive_dirty = false;
+    g_current_disk_path = WORK_DSK;
+  } else {
+    g_archive_src = ""; g_archive_kind = ARC_RAW; g_archive_dirty = false;
+    g_current_disk_path = path;
+  }
+  diskFile = SD.open(g_current_disk_path, "r+"); if (!diskFile) diskFile = SD.open(g_current_disk_path, "r");
+  return (bool)diskFile;
+}
+
+// 若目前磁碟來自壓縮檔且 work dsk 已被寫過，把 work dsk 回壓覆蓋原檔。
+// 在換片前呼叫；一次性整檔重壓（暫存檔→改名），故不在每次磁區寫入時做。
+void repackArchiveIfDirty() {
+  if (g_archive_src.length() == 0 || !g_archive_dirty) return;
+  flushDirtyTrack();                       // 確保最後一軌已落地到 work dsk
+  if (diskFile) diskFile.close();
+  bool ok = archive_compress(WORK_DSK, g_archive_src.c_str(), g_archive_kind);
+  Serial.printf("[ARC] Repack %s: %s\n", g_archive_src.c_str(), ok ? "OK" : "FAIL");
+  g_archive_dirty = false;
+  diskFile = SD.open(WORK_DSK, "r+"); if (!diskFile) diskFile = SD.open(WORK_DSK, "r");
+}
+
+// 持久化到 LASTDISK 的路徑：壓縮檔記原檔，純 dsk 記自身（不可記 work dsk）。
+String currentPersistPath() {
+  return g_archive_src.length() ? g_archive_src : g_current_disk_path;
+}
+
 // 掛載成功後：依 LASTDISK.TXT 開啟上次的 disk 映像並載入 track 0。
 // setup1 開機路徑與熱插拔插卡輪詢共用，避免兩處邏輯分歧。
 void openLastDisk() {
+  String path = g_current_disk_path;
   if (SD.exists("/LASTDISK.TXT")) {
     File f = SD.open("/LASTDISK.TXT", FILE_READ);
-    if (f) { String path = f.readStringUntil('\n'); path.trim(); if (path.length() > 0 && SD.exists(path)) { g_current_disk_path = path; } f.close(); }
+    if (f) { String p = f.readStringUntil('\n'); p.trim(); if (p.length() > 0 && SD.exists(p)) { path = p; } f.close(); }
   }
-  diskFile = SD.open(g_current_disk_path, "r+"); if (!diskFile) diskFile = SD.open(g_current_disk_path, "r");
-  if (diskFile) loadSingleTrack(0);
+  if (openDiskByPath(path)) loadSingleTrack(0);
 }
 
 // 低階快速探卡。SD.begin 在無卡時會卡在 ACMD41 約 2 秒逾時，若用它當輪詢偵測手段，
@@ -335,18 +390,57 @@ uint16_t get_hires_row_addr(uint8_t row, bool page2) {
   return base | ((row & 0x07) << 10) | ((row & 0x38) << 4) | ((row & 0xC0) >> 1) | ((row & 0xC0) >> 3);
 }
 
+// 是否為可載入磁碟檔(.dsk/.gz/.zip，排除解壓暫存工作檔)。
+static bool isMenuDiskEntry(File& entry) {
+  if (entry.isDirectory()) return false;
+  String name = String(entry.name());
+  if (archive_kind(name.c_str()) == ARC_UNKNOWN) return false;
+  return name != "_WORK.DSK" && name != "_REPACK.TMP";
+}
+
+// 只數總數，不在 RAM 存清單(無檔案數上限)。core0 專用。
 void scanDiskFiles() {
   disk_file_count = 0; File root = SD.open("/");
   if (!root) { Serial.println("SD ERROR: Cannot open root directory"); return; }
   while (true) {
     File entry = root.openNextFile(); if (!entry) break;
-    String name = String(entry.name());
-    if (!entry.isDirectory() && (name.endsWith(".DSK") || name.endsWith(".dsk"))) { 
-      if (disk_file_count < 20) { disk_files[disk_file_count++] = name; } 
+    if (isMenuDiskEntry(entry)) disk_file_count++;
+    entry.close();
+  }
+  root.close();
+}
+
+// 把從 base 起的一個可視頁(最多 MENU_VISIBLE_ROWS 筆)檔名讀進 disk_window[]。core0 專用。
+void fillDiskWindow(int base) {
+  for (int k = 0; k < MENU_VISIBLE_ROWS; k++) disk_window[k] = "";
+  File root = SD.open("/"); if (!root) return;
+  int idx = 0;
+  while (true) {
+    File entry = root.openNextFile(); if (!entry) break;
+    if (isMenuDiskEntry(entry)) {
+      if (idx >= base && idx < base + MENU_VISIBLE_ROWS) disk_window[idx - base] = String(entry.name());
+      idx++;
+    }
+    entry.close();
+    if (idx >= base + MENU_VISIBLE_ROWS) break;   // 視窗已填滿，不必再掃
+  }
+  root.close();
+}
+
+// 依掃描順序的 index 取得檔名(載入時用)。core0 專用。
+bool findDiskNameByIndex(int n, String& out) {
+  File root = SD.open("/"); if (!root) return false;
+  int idx = 0; bool found = false;
+  while (true) {
+    File entry = root.openNextFile(); if (!entry) break;
+    if (isMenuDiskEntry(entry)) {
+      if (idx == n) { out = String(entry.name()); found = true; entry.close(); break; }
+      idx++;
     }
     entry.close();
   }
   root.close();
+  return found;
 }
 
 void setup() {
@@ -454,13 +548,18 @@ void loop() {
 
   g_c0_checkpoint = 2;
   if (req_scan_disks && !ack_scan_disks) { scanDiskFiles(); ack_scan_disks = true; }
+  if (req_menu_fill >= 0) { fillDiskWindow(req_menu_fill); disk_window_base = req_menu_fill; req_menu_fill = -1; menu_fill_done = true; }
   if (req_load_disk_idx >= 0) {
-    if (disk_file_count > 0 && req_load_disk_idx < disk_file_count) {
-      flushDirtyTrack(); if (diskFile) diskFile.close(); g_current_disk_path = "/" + disk_files[req_load_disk_idx];
-      diskFile = SD.open(g_current_disk_path, "r+"); if (!diskFile) diskFile = SD.open(g_current_disk_path, "r");
-      if (SD.exists("/LASTDISK.TXT")) { SD.remove("/LASTDISK.TXT"); }
-      File f = SD.open("/LASTDISK.TXT", FILE_WRITE); if (f) { f.println(g_current_disk_path); f.close(); }
-      loadSingleTrack(0);
+    String name;
+    if (disk_file_count > 0 && req_load_disk_idx < disk_file_count && findDiskNameByIndex(req_load_disk_idx, name)) {
+      repackArchiveIfDirty();            // 換片前把舊壓縮檔的改動回壓
+      String newPath = "/" + name;
+      if (openDiskByPath(newPath)) {
+        String persist = currentPersistPath();
+        if (SD.exists("/LASTDISK.TXT")) { SD.remove("/LASTDISK.TXT"); }
+        File f = SD.open("/LASTDISK.TXT", FILE_WRITE); if (f) { f.println(persist); f.close(); }
+        loadSingleTrack(0);
+      }
     }
     req_load_disk_idx = -1; g_emu_paused = false;
   }
@@ -524,17 +623,31 @@ void updateStatusLine() {
   drawString(184, 222, buf, 0x0000, 0x07E0);
 }
 
+// 依目前選取項調整捲動視窗，確保高亮列落在可視範圍內（含上下繞回）。
+void clampMenuScroll() {
+  if (selected_file_idx < menu_scroll) menu_scroll = selected_file_idx;
+  else if (selected_file_idx >= menu_scroll + MENU_VISIBLE_ROWS) menu_scroll = selected_file_idx - MENU_VISIBLE_ROWS + 1;
+}
+
 void drawDiskMenu() {
-  tft_dma.fillScreen(0x0000); 
+  tft_dma.fillScreen(0x0000);
   tft_dma.drawRect(10, 10, 300, 2, 0xFFFF); tft_dma.drawRect(10, 228, 300, 2, 0xFFFF);
   tft_dma.drawRect(10, 10, 2, 220, 0xFFFF); tft_dma.drawRect(308, 10, 2, 220, 0xFFFF);
   drawString(30, 30, "SELECT DISK IMAGE:", 0xFFE0, 0x0000);
-  tft_dma.drawRect(10, 50, 300, 2, 0xFFFF); 
-  for (int i = 0; i < disk_file_count; i++) {
-    uint16_t y = 65 + (i * 12);
-    if (i == selected_file_idx) { tft_dma.drawRect(25, y-2, 270, 12, 0x07E0); drawString(30, y, "> " + disk_files[i], 0x0000, 0x07E0); }
-    else { drawString(30, y, "  " + disk_files[i], 0xFFFF, 0x0000); }
+  // 右上頁碼 (目前/總數)，讓使用者知道清單還有更多
+  if (disk_file_count > 0) drawString(210, 30, "(" + String(selected_file_idx + 1) + "/" + String(disk_file_count) + ")", 0xFFE0, 0x0000);
+  tft_dma.drawRect(10, 50, 300, 2, 0xFFFF);
+  int rows = disk_file_count - disk_window_base;
+  if (rows > MENU_VISIBLE_ROWS) rows = MENU_VISIBLE_ROWS; if (rows < 0) rows = 0;
+  for (int k = 0; k < rows; k++) {
+    int gi = disk_window_base + k;          // 全域 index
+    uint16_t y = 65 + (k * 12);
+    if (gi == selected_file_idx) { tft_dma.drawRect(25, y-2, 270, 12, 0x07E0); drawString(30, y, "> " + disk_window[k], 0x0000, 0x07E0); }
+    else { drawString(30, y, "  " + disk_window[k], 0xFFFF, 0x0000); }
   }
+  // 捲動指示：上方還有 → '^'，下方還有 → 'V'
+  if (disk_window_base > 0)                       drawString(296, 57,  "^", 0x07E0, 0x0000);
+  if (disk_window_base + rows < disk_file_count)  drawString(296, 216, "V", 0x07E0, 0x0000);
 }
 
 void setup1() {
@@ -612,10 +725,12 @@ void scan_matrix() {
   bool raw_alt = (digitalRead(BTN_ALT) == LOW);
 
   // BTN_ALT Combo Logic (Fixed Edge Detection)
-  static bool last_raw_b0 = false, last_raw_b1 = false;
+  static bool last_raw_b0 = false, last_raw_b1 = false, last_raw_right = false, last_raw_down = false;
   bool b0_clicked = raw_b0 && !last_raw_b0;
   bool b1_clicked = raw_b1 && !last_raw_b1;
-  last_raw_b0 = raw_b0; last_raw_b1 = raw_b1;
+  bool right_clicked = raw_right && !last_raw_right;   // 邊緣偵測（記錄抑制前的原始值）
+  bool down_clicked  = raw_down  && !last_raw_down;
+  last_raw_b0 = raw_b0; last_raw_b1 = raw_b1; last_raw_right = raw_right; last_raw_down = raw_down;
 
   if (raw_alt) {
     if (b1_clicked) { // BTN_ALT + BTN_B -> Toggle ARROWS mode
@@ -626,9 +741,14 @@ void scan_matrix() {
       g_speed_idx = (g_speed_idx + 1) % 4;
       updateStatusLine();
     }
-    // Suppress regular buttons when ALT is held
+    // BTN_ALT + RIGHT -> ENTER (0x0D)，+ DOWN -> SPACE (0x20)；選單中不送，避免殘留按鍵
+    if (right_clicked && !g_show_menu) pushHardwareKey(0x0D);
+    if (down_clicked  && !g_show_menu) pushHardwareKey(0x20);
+    // Suppress regular buttons/directions when ALT is held
     raw_b0 = false;
     raw_b1 = false;
+    raw_right = false;
+    raw_down = false;
   }
 
   unsigned long now_t = millis();
@@ -695,10 +815,19 @@ void loop1() {
 
   if (g_show_menu) {
     scan_matrix();
-    if (req_scan_disks) { if (ack_scan_disks) { req_scan_disks = false; selected_file_idx = 0; if (disk_file_count > 0) drawDiskMenu(); else drawString(30, 50, "NO DSK FILES FOUND", 0xF800, 0x0000); } return; }
+    if (req_scan_disks) { if (ack_scan_disks) { req_scan_disks = false; selected_file_idx = 0; menu_scroll = 0; if (disk_file_count > 0) { req_menu_fill = 0; menu_fill_done = false; } else drawString(30, 50, "NO DSK FILES FOUND", 0xF800, 0x0000); } return; }
+    if (menu_fill_done) { menu_fill_done = false; drawDiskMenu(); }   // core0 已填好可視頁 → 繪製
     static uint32_t last_m_nav = 0; bool b_u = joy_up || (g_menu_cmd == 1), b_d = joy_down || (g_menu_cmd == 2), b_e = joy_btn0 || (g_menu_cmd == 3), b_q = joy_btn1 || (g_menu_cmd == 4);
     if ((b_u || b_d || b_e || b_q) && millis() - last_m_nav > 200) {
-      if (disk_file_count > 0) { if (b_u) { selected_file_idx = (selected_file_idx - 1 + disk_file_count) % disk_file_count; drawDiskMenu(); } else if (b_d) { selected_file_idx = (selected_file_idx + 1) % disk_file_count; drawDiskMenu(); } else if (b_e) { req_load_disk_idx = selected_file_idx; g_show_menu = false; tft_dma.fillScreen(0); g_last_m_on = -1; g_last_drawn_track = -1; updateStatusLine(); } }
+      if (disk_file_count > 0) {
+        if (b_u || b_d) {
+          selected_file_idx = b_u ? (selected_file_idx - 1 + disk_file_count) % disk_file_count
+                                  : (selected_file_idx + 1) % disk_file_count;
+          clampMenuScroll();
+          if (menu_scroll == disk_window_base) drawDiskMenu();              // 同頁：直接移動高亮
+          else { req_menu_fill = menu_scroll; menu_fill_done = false; }     // 換頁：請 core0 重填
+        } else if (b_e) { req_load_disk_idx = selected_file_idx; g_show_menu = false; tft_dma.fillScreen(0); g_last_m_on = -1; g_last_drawn_track = -1; updateStatusLine(); }
+      }
       if (b_q) { g_show_menu = false; g_emu_paused = false; tft_dma.fillScreen(0); g_last_m_on = -1; g_last_drawn_track = -1; updateStatusLine(); } last_m_nav = millis(); g_menu_cmd = 0;
     }    return;
   }
