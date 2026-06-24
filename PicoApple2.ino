@@ -228,6 +228,8 @@ String g_current_disk_path = "/MASTER.DSK";   // file the track engine reads/wri
 String g_archive_src = "";        // original .gz/.zip path, or "" for a plain .dsk
 int    g_archive_kind = ARC_RAW;  // ARC_GZ / ARC_ZIP when g_archive_src set
 bool   g_archive_dirty = false;   // a track was written to the work dsk since last repack
+unsigned long g_motor_off_time = 0;          // 馬達最後停轉時刻(millis)；0 = 無待回壓
+#define ARCHIVE_REPACK_DELAY_MS 2500         // 馬達持續停轉這麼久且 dirty → 自動回壓(防抖)
 bool g_show_menu = false;
 bool g_joy_mode = true;
 int g_last_m_on = -1;
@@ -590,10 +592,17 @@ void loop() {
   int32_t reload_track = apple2_needs_disk_reload();
   spin_unlock(res_lock, irq_t);
 
-  g_c0_checkpoint = 5; 
-  if (last_motor_on && !motor_on) { flushDirtyTrack(); }
+  g_c0_checkpoint = 5;
+  if (last_motor_on && !motor_on) { flushDirtyTrack(); g_motor_off_time = millis(); } // 停轉：落地工作檔 + 起算回壓計時
+  if (!last_motor_on && motor_on) { g_motor_off_time = 0; }                            // 又轉起來：取消待回壓(避開操作中途)
   last_motor_on = motor_on;
   if (reload_track >= 0) { loadSingleTrack((uint8_t)reload_track); }
+  // 壓縮磁碟防抖回壓：馬達持續停轉超過 REPACK_DELAY 且工作檔已改動 → 整檔回壓一次。
+  // 把一連串寫入(如 DOS SAVE)合併成單次重壓；repackArchiveIfDirty() 內會清 dirty 不重複觸發。
+  if (g_archive_dirty && !motor_on && g_motor_off_time != 0 && (millis() - g_motor_off_time > ARCHIVE_REPACK_DELAY_MS)) {
+    repackArchiveIfDirty();
+    g_motor_off_time = 0;
+  }
 
   g_c0_checkpoint = 6; 
   unsigned long expected = (unsigned long)((float)cycles / (1.023f * g_speed_multipliers[g_speed_idx]));
