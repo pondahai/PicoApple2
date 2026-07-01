@@ -245,6 +245,13 @@ volatile int  disk_window_base = 0;  // disk_window[] 目前對應的起始 inde
 volatile int  req_menu_fill = -1;    // core1→core0：請填從此 index 起的可視頁
 volatile bool menu_fill_done = false;// core0→core1：可視頁已就緒，可繪製
 volatile uint8_t g_menu_cmd = 0;
+int  g_last_selected_idx = 0;        // 記住上次選取位置（跨選單開啟，免每次從頭找）
+bool g_menu_pos_valid = false;       // 本次開機是否已動過光棒/載過片（false=剛開機/RESET）
+int  g_menu_loaded_idx = -1;         // 掃描時找出「目前已載入磁碟」在清單中的 index（給 RESET 後定位）
+String g_pending_load_name;          // core1→core0：欲載入的「確切檔名」(與光棒顯示一致)
+volatile bool req_menu_root_reset = false; // core1→core0：關閉並重置目錄列舉游標
+// 目錄列舉游標：選單期間保持 root 開啟，往下捲動只需前進(O(1))，免每換頁從頭重掃(O(n))。core0 專用。
+File g_menu_root; bool g_menu_root_open = false; int g_menu_root_pos = 0;
 
 volatile bool req_scan_disks = false;
 volatile bool ack_scan_disks = false;
@@ -401,48 +408,53 @@ static bool isMenuDiskEntry(File& entry) {
 }
 
 // 只數總數，不在 RAM 存清單(無檔案數上限)。core0 專用。
+// 順便找出「目前已載入磁碟」在清單中的 index，供 RESET 重開後把光棒定位回去。
 void scanDiskFiles() {
-  disk_file_count = 0; File root = SD.open("/");
+  disk_file_count = 0; g_menu_loaded_idx = -1;
+  String target = currentPersistPath();   // 例 "/GAME.ZIP" → 取檔名 "GAME.ZIP"
+  int sl = target.lastIndexOf('/'); if (sl >= 0) target = target.substring(sl + 1);
+  File root = SD.open("/");
   if (!root) { Serial.println("SD ERROR: Cannot open root directory"); return; }
   while (true) {
     File entry = root.openNextFile(); if (!entry) break;
-    if (isMenuDiskEntry(entry)) disk_file_count++;
+    if (isMenuDiskEntry(entry)) {
+      if (g_menu_loaded_idx < 0 && target.length() && String(entry.name()).equalsIgnoreCase(target)) g_menu_loaded_idx = disk_file_count;
+      disk_file_count++;
+    }
     entry.close();
   }
   root.close();
+}
+
+// 目錄列舉游標管理(core0 專用)。選單期間保持 root 開啟，避免每換頁都 SD.open+從頭重掃。
+static void menuRootClose() { if (g_menu_root_open) { g_menu_root.close(); g_menu_root_open = false; } g_menu_root_pos = 0; }
+static bool menuRootEnsure() {
+  if (!g_menu_root_open) { g_menu_root = SD.open("/"); g_menu_root_open = (bool)g_menu_root; g_menu_root_pos = 0; }
+  return g_menu_root_open;
+}
+// 取得目錄中下一個「可載入磁碟檔」的檔名，游標前進一筆。回傳是否取到。
+static bool menuRootNext(String& out) {
+  while (true) {
+    File e = g_menu_root.openNextFile(); if (!e) return false;
+    bool ok = isMenuDiskEntry(e);
+    if (ok) out = String(e.name());
+    e.close();
+    if (ok) return true;
+  }
 }
 
 // 把從 base 起的一個可視頁(最多 MENU_VISIBLE_ROWS 筆)檔名讀進 disk_window[]。core0 專用。
+// 往下捲動時 base 單調遞增 → 只前進游標(免重掃)；往回捲超出游標才 rewind。
 void fillDiskWindow(int base) {
   for (int k = 0; k < MENU_VISIBLE_ROWS; k++) disk_window[k] = "";
-  File root = SD.open("/"); if (!root) return;
-  int idx = 0;
-  while (true) {
-    File entry = root.openNextFile(); if (!entry) break;
-    if (isMenuDiskEntry(entry)) {
-      if (idx >= base && idx < base + MENU_VISIBLE_ROWS) disk_window[idx - base] = String(entry.name());
-      idx++;
-    }
-    entry.close();
-    if (idx >= base + MENU_VISIBLE_ROWS) break;   // 視窗已填滿，不必再掃
+  if (!menuRootEnsure()) return;
+  if (base < g_menu_root_pos) { g_menu_root.rewindDirectory(); g_menu_root_pos = 0; } // 需往回 → 倒帶
+  String name;
+  while (g_menu_root_pos < base) { if (!menuRootNext(name)) return; g_menu_root_pos++; } // 快轉到 base
+  for (int k = 0; k < MENU_VISIBLE_ROWS; k++) {
+    if (!menuRootNext(name)) break;
+    disk_window[k] = name; g_menu_root_pos++;
   }
-  root.close();
-}
-
-// 依掃描順序的 index 取得檔名(載入時用)。core0 專用。
-bool findDiskNameByIndex(int n, String& out) {
-  File root = SD.open("/"); if (!root) return false;
-  int idx = 0; bool found = false;
-  while (true) {
-    File entry = root.openNextFile(); if (!entry) break;
-    if (isMenuDiskEntry(entry)) {
-      if (idx == n) { out = String(entry.name()); found = true; entry.close(); break; }
-      idx++;
-    }
-    entry.close();
-  }
-  root.close();
-  return found;
 }
 
 void setup() {
@@ -549,11 +561,13 @@ void loop() {
   }
 
   g_c0_checkpoint = 2;
-  if (req_scan_disks && !ack_scan_disks) { scanDiskFiles(); ack_scan_disks = true; }
+  if (req_scan_disks && !ack_scan_disks) { menuRootClose(); scanDiskFiles(); ack_scan_disks = true; }
+  if (req_menu_root_reset) { req_menu_root_reset = false; menuRootClose(); }
   if (req_menu_fill >= 0) { fillDiskWindow(req_menu_fill); disk_window_base = req_menu_fill; req_menu_fill = -1; menu_fill_done = true; }
   if (req_load_disk_idx >= 0) {
-    String name;
-    if (disk_file_count > 0 && req_load_disk_idx < disk_file_count && findDiskNameByIndex(req_load_disk_idx, name)) {
+    menuRootClose();                     // 釋放目錄列舉游標，避免與載入用 SD 存取相衝
+    String name = g_pending_load_name;   // 載入光棒所指的「確切檔名」(與顯示一致，不再用索引重掃)
+    if (name.length() > 0) {
       repackArchiveIfDirty();            // 換片前把舊壓縮檔的改動回壓
       String newPath = "/" + name;
       if (openDiskByPath(newPath)) {
@@ -797,7 +811,14 @@ void scan_matrix() {
           last_fkey_t = millis();
           if (g_f_key_event == 1) { uint32_t irq = spin_lock_blocking(res_lock); apple2_warm_reset(); spin_unlock(res_lock, irq); }
           else if (g_f_key_event == 2) { uint32_t irq = spin_lock_blocking(res_lock); apple2_reset(); spin_unlock(res_lock, irq); req_reload_track0 = true; }
-          else if (g_f_key_event == 3) { if (!g_show_menu) { g_emu_paused = true; req_scan_disks = true; ack_scan_disks = false; g_show_menu = true; tft_dma.fillScreen(0x0000); drawString(30, 30, "SCANNING SD...", 0xFFFF, 0x0000); } else { g_menu_cmd = 4; } }
+          else if (g_f_key_event == 3) { if (!g_show_menu) { g_emu_paused = true; req_scan_disks = true; ack_scan_disks = false; g_show_menu = true;
+              tft_dma.waitTransferDone();   // 排空前一張畫面的 scanline DMA，避免進選單瞬間殘像(花屏)
+              tft_dma.fillScreen(0x0000);
+              tft_dma.drawRect(10, 10, 300, 2, 0xFFFF); tft_dma.drawRect(10, 228, 300, 2, 0xFFFF);
+              tft_dma.drawRect(10, 10, 2, 220, 0xFFFF); tft_dma.drawRect(308, 10, 2, 220, 0xFFFF);
+              drawString(95, 105, "LOADING MENU...", 0xFFE0, 0x0000);
+              drawString(110, 125, "PLEASE WAIT", 0xFFFF, 0x0000);
+            } else { g_menu_cmd = 4; } }
           else if (g_f_key_event == 4) { g_joy_mode = !g_joy_mode; updateStatusLine(); }
           else if (g_f_key_event == 5) { g_speed_idx = (g_speed_idx + 1) % 4; updateStatusLine(); }
       }
@@ -824,21 +845,52 @@ void loop1() {
 
   if (g_show_menu) {
     scan_matrix();
-    if (req_scan_disks) { if (ack_scan_disks) { req_scan_disks = false; selected_file_idx = 0; menu_scroll = 0; if (disk_file_count > 0) { req_menu_fill = 0; menu_fill_done = false; } else drawString(30, 50, "NO DSK FILES FOUND", 0xF800, 0x0000); } return; }
+    if (req_scan_disks) { if (ack_scan_disks) { req_scan_disks = false;
+        if (disk_file_count > 0) {
+          // 定位光棒：本次開機動過 → 用上次選取位置；剛開機/RESET → 用「目前已載入磁碟」的位置
+          // (跨 RESET 也記得，因為已載入磁碟由 LASTDISK.TXT 持久化)；都沒有才回到第 0 筆。
+          selected_file_idx = g_menu_pos_valid ? g_last_selected_idx
+                                               : (g_menu_loaded_idx >= 0 ? g_menu_loaded_idx : 0);
+          if (selected_file_idx >= disk_file_count) selected_file_idx = disk_file_count - 1;
+          if (selected_file_idx < 0) selected_file_idx = 0;
+          menu_scroll = 0; clampMenuScroll();
+          req_menu_fill = menu_scroll; menu_fill_done = false;
+        } else { selected_file_idx = 0; menu_scroll = 0; drawString(30, 50, "NO DSK FILES FOUND", 0xF800, 0x0000); }
+      } return; }
     if (menu_fill_done) { menu_fill_done = false; drawDiskMenu(); }   // core0 已填好可視頁 → 繪製
-    static uint32_t last_m_nav = 0; bool b_u = joy_up || (g_menu_cmd == 1), b_d = joy_down || (g_menu_cmd == 2), b_e = joy_btn0 || (g_menu_cmd == 3), b_q = joy_btn1 || (g_menu_cmd == 4);
-    if ((b_u || b_d || b_e || b_q) && millis() - last_m_nav > 200) {
-      if (disk_file_count > 0) {
-        if (b_u || b_d) {
-          selected_file_idx = b_u ? (selected_file_idx - 1 + disk_file_count) % disk_file_count
-                                  : (selected_file_idx + 1) % disk_file_count;
-          clampMenuScroll();
-          if (menu_scroll == disk_window_base) drawDiskMenu();              // 同頁：直接移動高亮
-          else { req_menu_fill = menu_scroll; menu_fill_done = false; }     // 換頁：請 core0 重填
-        } else if (b_e) { req_load_disk_idx = selected_file_idx; g_show_menu = false; tft_dma.fillScreen(0); g_last_m_on = -1; g_last_drawn_track = -1; updateStatusLine(); }
+
+    // 導覽改採「邊緣偵測 + 延遲自動連發」：按一下只動一格(杜絕跳兩格)，按住 400ms 後才開始連發。
+    static bool prev_u = false, prev_d = false, prev_e = false, prev_q = false;
+    static uint32_t nav_hold_t0 = 0, last_repeat = 0;
+    bool b_u = joy_up || (g_menu_cmd == 1), b_d = joy_down || (g_menu_cmd == 2);
+    bool b_e = joy_btn0 || (g_menu_cmd == 3), b_q = joy_btn1 || (g_menu_cmd == 4);
+    g_menu_cmd = 0;   // 序列命令視為單一邊緣，讀完即清
+
+    uint32_t now_m = millis();
+    int step = 0;     // -1 上, +1 下
+    if (b_u && !prev_u) { step = -1; nav_hold_t0 = now_m; last_repeat = now_m; }
+    else if (b_d && !prev_d) { step = +1; nav_hold_t0 = now_m; last_repeat = now_m; }
+    else if ((b_u || b_d) && now_m - nav_hold_t0 > 400 && now_m - last_repeat > 130) { step = b_u ? -1 : +1; last_repeat = now_m; }
+    bool do_load = b_e && !prev_e, do_quit = b_q && !prev_q;
+    prev_u = b_u; prev_d = b_d; prev_e = b_e; prev_q = b_q;
+
+    if (disk_file_count > 0 && step != 0) {
+      selected_file_idx = (selected_file_idx + step + disk_file_count) % disk_file_count;
+      g_last_selected_idx = selected_file_idx; g_menu_pos_valid = true;
+      clampMenuScroll();
+      if (menu_scroll == disk_window_base) drawDiskMenu();              // 同頁：直接移動高亮
+      else { req_menu_fill = menu_scroll; menu_fill_done = false; }     // 換頁：請 core0 重填
+    }
+    if (disk_file_count > 0 && do_load) {
+      int w = selected_file_idx - disk_window_base;                     // 載入「光棒所指的確切檔名」
+      if (w >= 0 && w < MENU_VISIBLE_ROWS && disk_window[w].length() > 0) {
+        g_pending_load_name = disk_window[w]; g_last_selected_idx = selected_file_idx; g_menu_pos_valid = true;
+        req_menu_root_reset = true; req_load_disk_idx = selected_file_idx;
+        g_show_menu = false; tft_dma.fillScreen(0); g_last_m_on = -1; g_last_drawn_track = -1; updateStatusLine();
       }
-      if (b_q) { g_show_menu = false; g_emu_paused = false; tft_dma.fillScreen(0); g_last_m_on = -1; g_last_drawn_track = -1; updateStatusLine(); } last_m_nav = millis(); g_menu_cmd = 0;
-    }    return;
+    }
+    if (do_quit) { req_menu_root_reset = true; g_show_menu = false; g_emu_paused = false; tft_dma.fillScreen(0); g_last_m_on = -1; g_last_drawn_track = -1; updateStatusLine(); }
+    return;
   }
   
   static uint16_t next_draw_y = 0;
@@ -876,6 +928,9 @@ void loop1() {
       // Execute the matrix scan ONLY once per frame during VBLANK.
       // This is perfectly synced with 60Hz and completely avoids SPI DMA running concurrently.
       scan_matrix();
+      // scan_matrix() 可能在此剛把 g_show_menu 設為 true 並畫好「LOADING MENU」畫面；
+      // 若不在此中止，下方的模擬掃描線繪製會立刻把選單畫面覆蓋掉 → 進選單前一閃花屏。
+      if (g_show_menu) return;
   }
 
   while (next_draw_y <= cpu_y && next_draw_y < 192) {
