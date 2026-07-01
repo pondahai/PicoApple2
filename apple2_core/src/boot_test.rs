@@ -11,6 +11,57 @@ mod tests {
     use std::vec::Vec;
     use std::{env, fs, println};
 
+    // 迴歸測試：用 Championship Lode Runner 的真實搖桿讀取常式($8B80，39 bytes)驗證
+    // 四個方向都能被判讀。CLR 每圈 54-cycle 的粗略迴圈把脈衝寬度數到 $65(X)/$66(Y)，
+    // 門檻 <15 或 >=55($37) 才算有效方向。滿舵(255)必須數到 >=55；純線性 8+v*11 只給
+    // 52 圈 → 右/下失效，這是 memory.rs 滿舵飽和區補償要守住的行為。
+    fn clr_joystick_count(px: u8, py: u8) -> (u8, u8) {
+        use crate::cpu::CPU;
+        use crate::memory::{Apple2Memory, Memory};
+        let routine: [u8; 39] = [
+            0xA9,0x00, 0x85,0x65, 0x85,0x66, 0xAD,0x70,0xC0, 0xA2,0x01,
+            0xBD,0x64,0xC0, 0x10,0x13, 0xF6,0x65, 0xCA, 0x10,0xF6,
+            0xAD,0x64,0xC0, 0x0D,0x65,0xC0, 0x10,0x09, 0xA5,0x65, 0x05,0x66,
+            0x10,0xE6, 0xEA, 0x10,0xEC, 0x60,
+        ];
+        let mut mem = Apple2Memory::new();
+        mem.paddles[0] = px;
+        mem.paddles[1] = py;
+        let mut cpu = CPU::new();
+        for (i,b) in routine.iter().enumerate() { mem.write(0x8B80 + i as u16, *b); }
+        mem.write(0x1000,0x20); mem.write(0x1001,0x80); mem.write(0x1002,0x8B);
+        mem.write(0x1003,0x4C); mem.write(0x1004,0x03); mem.write(0x1005,0x10);
+        cpu.pc = 0x1000;
+        let mut total: u64 = 0;
+        for _ in 0..200000 {
+            mem.begin_cpu_step(total);
+            let c = cpu.step(&mut mem);
+            mem.finalize_cpu_step_cycles(c);
+            mem.end_cpu_step();
+            total += c as u64;
+            if cpu.pc == 0x1003 { break; }
+        }
+        (mem.read(0x0065), mem.read(0x0066))
+    }
+
+    #[test]
+    fn clr_joystick_all_four_directions_register() {
+        // 右/下(滿舵 255)必須跨過 55 門檻
+        let (rx, _) = clr_joystick_count(255, 128);
+        assert!(rx >= 0x37, "RIGHT 滿舵計數 {} 應 >=55(0x37) 才能判讀為右", rx);
+        let (_, dy) = clr_joystick_count(128, 255);
+        assert!(dy >= 0x37, "DOWN 滿舵計數 {} 應 >=55(0x37) 才能判讀為下", dy);
+        // 左/上(0)必須在 <15 區
+        let (lx, _) = clr_joystick_count(0, 128);
+        assert!(lx < 0x0F, "LEFT 計數 {} 應 <15", lx);
+        let (_, uy) = clr_joystick_count(128, 0);
+        assert!(uy < 0x0F, "UP 計數 {} 應 <15", uy);
+        // 置中(128)必須落在中立區 15..55，避免靜止被誤判成方向
+        let (cx, cy) = clr_joystick_count(128, 128);
+        assert!((0x0F..0x37).contains(&cx) && (0x0F..0x37).contains(&cy),
+            "CENTER 計數 ({},{}) 應落在中立區 15..55", cx, cy);
+    }
+
     fn text_row_addr(row: usize) -> usize {
         ((row & 0x07) << 7) | ((row & 0x18) * 5) | 0x0400
     }
@@ -75,6 +126,8 @@ mod tests {
             out
         }).unwrap_or_default();
         let type_at_cycle: u64 = (env::var("BOOT_TYPE_AT").ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) * 1_020_500.0) as u64;
+        // BOOT_TYPE_GAP=秒數: 每個按鍵之間至少間隔這麼久（用來慢速翻頁）
+        let type_gap: u64 = (env::var("BOOT_TYPE_GAP").ok().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) * 1_020_500.0) as u64;
         let mut type_idx = 0usize;
 
         while cycles < target {
@@ -91,7 +144,8 @@ mod tests {
                     crate::apple2_set_paddle(1, py);
                 }
             }
-            if cycles >= type_at_cycle && type_idx < type_keys.len() && crate::apple2_is_ready_for_key() {
+            if cycles >= type_at_cycle && type_idx < type_keys.len() && crate::apple2_is_ready_for_key()
+                && cycles >= type_at_cycle + (type_idx as u64) * type_gap {
                 crate::apple2_handle_key(type_keys[type_idx] & 0x7F);
                 type_idx += 1;
             }
@@ -104,6 +158,21 @@ mod tests {
             // 取樣 PC 作為熱點直方圖（粗略即可）
             if sample % 7 == 0 && cycles > target.saturating_sub(2_000_000) {
                 *pc_hist.entry(cpu_pc()).or_insert(0) += 1;
+            }
+            // BOOT_TEXT_EVERY=秒數: 每隔 N 秒 dump 一次文字畫面（頁1），用來翻閱多頁畫面
+            if let Ok(sec) = env::var("BOOT_TEXT_EVERY") {
+                if let Ok(iv) = sec.parse::<f64>() {
+                    let step = (iv * 1_020_500.0) as u64;
+                    if step > 0 {
+                        static mut LAST_DUMP: u64 = 0;
+                        let last = unsafe { LAST_DUMP };
+                        if cycles >= last + step {
+                            unsafe { LAST_DUMP = cycles; }
+                            println!("--- text @ {:.1}s ---", cycles as f64 / 1_020_500.0);
+                            dump_text_screen();
+                        }
+                    }
+                }
             }
             // 追蹤磁頭 1/4 軌位置變化
             unsafe {

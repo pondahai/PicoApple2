@@ -235,7 +235,13 @@ impl Memory for Apple2Memory {
                     0xC062 => if self.pushbuttons[1] { 0x80 } else { 0x00 },
                     0xC064..=0xC067 => {
                         let el = (self.cpu_step_cycle_base + self.cpu_step_cycle_cursor as u64).saturating_sub(self.paddle_latch_cycle);
-                        if el < (8 + (self.paddles[(addr - 0xC064) as usize] as u64 * 11)) { 0x80 } else { 0x00 }
+                        // 脈衝寬度：中低段維持線性 8+v*11(PREAD 讀值不變)；滿舵段額外拉長。
+                        // 真實 Apple II 滿舵脈衝約 3300+ cycle(進入 PREAD 量程外的飽和區)，
+                        // PREAD(含 DEY)仍讀 255，但每圈 54-cycle 的粗略讀桿迴圈(如 Championship
+                        // Lode Runner，門檻 55 圈)需要這段額外長度。純線性只到 2813(v=255)，
+                        // 讓 CLR 滿舵僅數到 52 < 55 → 右/下失效。對 v>192 追加斜率補進飽和區。
+                        let v = self.paddles[(addr - 0xC064) as usize] as u64;
+                        if el < (8 + v * 11 + v.saturating_sub(192) * 6) { 0x80 } else { 0x00 }
                     }
                     0xC070 => { self.paddle_latch_cycle = self.cpu_step_cycle_base + self.cpu_step_cycle_cursor as u64; 0 }
                     // 其餘未驅動 I/O 讀取走 floating bus。

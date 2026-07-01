@@ -1,5 +1,22 @@
 # Pico Apple II Emulator - Development Log
 
+## 2026-07-01: 部分遊戲搖桿「右/下」失效——滿舵脈衝太短，補上飽和區（實機驗證通過 ✅）
+
+### 症狀
+*   某些遊戲搖桿的**右**與**下**沒作用，左/上正常；切換韌體 JOYSTICK/KEYBOARD 模式都一樣；其他遊戲與 F3 選單方向都正常。代表案例：**Championship Lode Runner (CLR)**。
+
+### 診斷（實測，非推理——中途一次錯誤猜測的教訓）
+*   **先排除的兩條路（都用 host 端實測坐實）**：①paddle 讀取時序正確——用真實 6502 迴圈量測，emulator 對 paddle 值 0~255 全部原封讀回，無溢位；②輸入映射左右/上下對稱、實體輸入確實有到（選單/他遊戲正常）。第一次「255→256 溢位」的猜測**是錯的**，已完整還原、不要再走那條路。**問題與輸入值無關，在讀取端脈衝長度。**
+*   **關鍵**：切換韌體搖桿模式對「讀類比搖桿的遊戲」根本沒換路徑——`apple2_set_paddle` 吃的是實體按鍵狀態、兩模式共用，所以兩模式一起壞是必然，不能拿來證明遊戲壞掉。
+*   **抓真凶**：boot_test 開機 CLR → `BOOT_DUMP` dump 主 RAM → grep 特徵碼 `AD 70 C0`/`AD 64 C0`/`AD 65 C0` 找到讀桿常式 `$8B80` → 反組譯：它每圈 **54 cycle**（逐指令核對，週期正確）把脈衝寬度數到 `$65`(X)/`$66`(Y)，門檻 `CMP #$37`=55：計數 <15 或 ≥55 才算有效方向。
+*   **把該常式原始位元組塞進真實 CPU+Apple2Memory 直接跑**，量各方向計數：左=0、上=1（過關）；**右=52、下=52 → 差門檻 55 臨門一腳 → 失效**；置中=26/27（中立）。
+
+### 根因與修正
+*   滿舵要數到 ≥55 需脈衝 ≥55×54=**2970 cycle**，但 memory.rs 舊式線性 `8+value*11` 在 v=255 只給 **2813 cycle**（→52 圈）。真實 Apple II 滿舵脈衝約 **3300+ cycle**（進入 PREAD 量程外「飽和區」；PREAD 含 DEY 照樣讀 255），模擬器把滿舵截太短。
+*   **修正**（memory.rs `0xC064..=0xC067` 讀取分支）：`if el < (8 + v*11 + v.saturating_sub(192)*6)`。只把 v>192 高值段補進飽和區，**v≤192 與置中 128 byte-for-byte 不變**，不影響其他比例式讀桿遊戲。修後 CLR 右/下數到 **59**（過門檻）、置中仍中立。
+*   **迴歸測試**：boot_test.rs `clr_joystick_all_four_directions_register`（用 CLR 真實常式斷言四方向+置中）。並加兩個 host 除錯旋鈕：`BOOT_TEXT_EVERY`（每N秒 dump 文字畫面翻多頁）、`BOOT_TYPE_GAP`（按鍵間隔慢速翻頁）。備忘：`memory_test.rs`/`cpu_test.rs` 未被 lib.rs `mod` 進去＝死檔不編譯，加測試要放 `boot_test.rs`。
+*   **成果**：主機端測試 7 passed、thumbv6m target 編譯 exit 0；重跑 full_build.bat 燒錄後實機四方向恢復 ✅。
+
 ## 2026-06-24: 上電延遲改為「有上限輪詢」+ 燒錄/編譯流程備忘（實機燒錄通過 ✅）
 
 *   **改動**: 把 Core 0 serial 與 Core 1 開頭兩段 `delay(2000)` 盲等改成 **bounded poll**（輪詢 + 2 秒上限）。新增 `g_core0_ready`：Core 0 完成 `apple2_init()` 後置 true，Core 1 輪詢它放行。最壞情況等同舊行為（零回歸），正常情況省下大半開機等待。serial 那段務必保留上限——無上限的 `while(!Serial)` 會讓獨立開機卡死。
