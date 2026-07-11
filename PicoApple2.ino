@@ -652,22 +652,39 @@ void clampMenuScroll() {
   else if (selected_file_idx >= menu_scroll + MENU_VISIBLE_ROWS) menu_scroll = selected_file_idx - MENU_VISIBLE_ROWS + 1;
 }
 
+// 右上頁碼 (目前/總數)。補空白到固定寬度，部分重繪時才能蓋掉變短的舊數字。
+void drawMenuCounter() {
+  if (disk_file_count <= 0) return;
+  String s = "(" + String(selected_file_idx + 1) + "/" + String(disk_file_count) + ")";
+  while (s.length() < 12) s += ' ';
+  drawString(210, 30, s, 0xFFE0, 0x0000);
+}
+
+// 重畫清單中第 w 列(視窗內 index)，依是否為目前選取決定高亮。
+// clear_bg：部分重繪時需先把整條列底清掉(高亮綠條比檔名寬)；整頁重繪後畫面已是黑底可免。
+void drawMenuRow(int w, bool clear_bg) {
+  if (w < 0 || w >= MENU_VISIBLE_ROWS) return;
+  int gi = disk_window_base + w;            // 全域 index
+  if (gi >= disk_file_count || disk_window[w].length() == 0) return;
+  uint16_t y = 65 + (w * 12);
+  if (gi == selected_file_idx) { tft_dma.drawRect(25, y-2, 270, 12, 0x07E0); drawString(30, y, "> " + disk_window[w], 0x0000, 0x07E0); }
+  else {
+    if (clear_bg) tft_dma.drawRect(25, y-2, 270, 12, 0x0000);
+    drawString(30, y, "  " + disk_window[w], 0xFFFF, 0x0000);
+  }
+}
+
 void drawDiskMenu() {
   tft_dma.fillScreen(0x0000);
   tft_dma.drawRect(10, 10, 300, 2, 0xFFFF); tft_dma.drawRect(10, 228, 300, 2, 0xFFFF);
   tft_dma.drawRect(10, 10, 2, 220, 0xFFFF); tft_dma.drawRect(308, 10, 2, 220, 0xFFFF);
   drawString(30, 30, "SELECT DISK IMAGE:", 0xFFE0, 0x0000);
   // 右上頁碼 (目前/總數)，讓使用者知道清單還有更多
-  if (disk_file_count > 0) drawString(210, 30, "(" + String(selected_file_idx + 1) + "/" + String(disk_file_count) + ")", 0xFFE0, 0x0000);
+  drawMenuCounter();
   tft_dma.drawRect(10, 50, 300, 2, 0xFFFF);
   int rows = disk_file_count - disk_window_base;
   if (rows > MENU_VISIBLE_ROWS) rows = MENU_VISIBLE_ROWS; if (rows < 0) rows = 0;
-  for (int k = 0; k < rows; k++) {
-    int gi = disk_window_base + k;          // 全域 index
-    uint16_t y = 65 + (k * 12);
-    if (gi == selected_file_idx) { tft_dma.drawRect(25, y-2, 270, 12, 0x07E0); drawString(30, y, "> " + disk_window[k], 0x0000, 0x07E0); }
-    else { drawString(30, y, "  " + disk_window[k], 0xFFFF, 0x0000); }
-  }
+  for (int k = 0; k < rows; k++) drawMenuRow(k, false);
   // 捲動指示：上方還有 → '^'，下方還有 → 'V'
   if (disk_window_base > 0)                       drawString(296, 57,  "^", 0x07E0, 0x0000);
   if (disk_window_base + rows < disk_file_count)  drawString(296, 216, "V", 0x07E0, 0x0000);
@@ -748,12 +765,14 @@ void scan_matrix() {
   bool raw_alt = (digitalRead(BTN_ALT) == LOW);
 
   // BTN_ALT Combo Logic (Fixed Edge Detection)
-  static bool last_raw_b0 = false, last_raw_b1 = false, last_raw_right = false, last_raw_down = false;
+  static bool last_raw_b0 = false, last_raw_b1 = false, last_raw_right = false, last_raw_down = false, last_raw_left = false, last_raw_up = false;
   bool b0_clicked = raw_b0 && !last_raw_b0;
   bool b1_clicked = raw_b1 && !last_raw_b1;
   bool right_clicked = raw_right && !last_raw_right;   // 邊緣偵測（記錄抑制前的原始值）
   bool down_clicked  = raw_down  && !last_raw_down;
-  last_raw_b0 = raw_b0; last_raw_b1 = raw_b1; last_raw_right = raw_right; last_raw_down = raw_down;
+  bool left_clicked  = raw_left  && !last_raw_left;
+  bool up_clicked    = raw_up    && !last_raw_up;
+  last_raw_b0 = raw_b0; last_raw_b1 = raw_b1; last_raw_right = raw_right; last_raw_down = raw_down; last_raw_left = raw_left; last_raw_up = raw_up;
 
   if (raw_alt) {
     if (b1_clicked) { // BTN_ALT + BTN_B -> Toggle ARROWS mode
@@ -764,14 +783,18 @@ void scan_matrix() {
       g_speed_idx = (g_speed_idx + 1) % 4;
       updateStatusLine();
     }
-    // BTN_ALT + RIGHT -> ENTER (0x0D)，+ DOWN -> SPACE (0x20)；選單中不送，避免殘留按鍵
+    // BTN_ALT + RIGHT -> ENTER (0x0D)，+ DOWN -> SPACE (0x20)，+ LEFT -> 'J'，+ UP -> 'K'；選單中不送，避免殘留按鍵
     if (right_clicked && !g_show_menu) pushHardwareKey(0x0D);
     if (down_clicked  && !g_show_menu) pushHardwareKey(0x20);
+    if (left_clicked  && !g_show_menu) pushHardwareKey('J');
+    if (up_clicked    && !g_show_menu) pushHardwareKey('K');
     // Suppress regular buttons/directions when ALT is held
     raw_b0 = false;
     raw_b1 = false;
     raw_right = false;
     raw_down = false;
+    raw_left = false;
+    raw_up = false;
   }
 
   unsigned long now_t = millis();
@@ -875,10 +898,15 @@ void loop1() {
     prev_u = b_u; prev_d = b_d; prev_e = b_e; prev_q = b_q;
 
     if (disk_file_count > 0 && step != 0) {
+      int prev_sel = selected_file_idx;
       selected_file_idx = (selected_file_idx + step + disk_file_count) % disk_file_count;
       g_last_selected_idx = selected_file_idx; g_menu_pos_valid = true;
       clampMenuScroll();
-      if (menu_scroll == disk_window_base) drawDiskMenu();              // 同頁：直接移動高亮
+      if (menu_scroll == disk_window_base) {                            // 同頁：只重畫舊/新兩列＋頁碼，免整頁重繪(fillScreen 一次 ~100ms)
+        drawMenuRow(prev_sel - disk_window_base, true);
+        drawMenuRow(selected_file_idx - disk_window_base, true);
+        drawMenuCounter();
+      }
       else { req_menu_fill = menu_scroll; menu_fill_done = false; }     // 換頁：請 core0 重填
     }
     if (disk_file_count > 0 && do_load) {

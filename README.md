@@ -161,6 +161,8 @@
 | `ALT + B` (Btn B) | 切換 方向鍵 ↔ 搖桿 模式 |
 | `ALT + RIGHT` | 送出 **ENTER** (Return) |
 | `ALT + DOWN` | 送出 **SPACE** |
+| `ALT + LEFT` | 送出 **`J`** (大寫) |
+| `ALT + UP` | 送出 **`K`** (大寫) |
 
 ### 4. 磁碟選單操作 (Disk Menu)
 當進入磁碟選單後（F3 / Fn+3 / Menu 按鈕），操作方式如下：
