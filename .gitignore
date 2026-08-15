@@ -26,6 +26,7 @@ arduino-cli.exe
 .gemini/
 .vscode/
 build/
+build_offset/
 
 # OS Files
 Thumbs.db
