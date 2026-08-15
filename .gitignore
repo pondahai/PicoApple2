@@ -4,6 +4,9 @@
 roms/
 *.rom
 *.ROM
+# 加上任何附檔名的變體 —— *.rom.bak 曾經從 *.rom 的縫裡漏進 git
+*.rom.*
+*.ROM.*
 
 # Rust build artifacts
 apple2_core/target/
