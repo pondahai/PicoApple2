@@ -114,6 +114,111 @@
 
 ---
 
+## 💾 搭配開機載入器 (rp2040-retro-loader)
+
+[rp2040-retro-loader](https://github.com/pondahai/rp2040-retro-loader) 是同一台掌機的開機載入器：冷開機進選單、從 SD 卡挑一個 `.uf2` 燒進 flash、交棒執行。要讓 PicoApple2 能被它載入，必須用**偏移編譯模式**重新編譯。
+
+```bash
+.\build_offset.bat
+```
+
+產出 `build_offset\PicoApple2_standalone.uf2`。這個檔案兩種用法都吃得下：放進 SD 卡根目錄給載入器，或直接用 USB 燒進去。**平常開發不受影響**——`full_build.bat` 完全沒動，偏移模式是另一支獨立的腳本。
+
+### 為什麼要重新編譯
+
+載入器住在 flash 最前面 16KB（ROM 只認那裡），所以專題本體必須讓開：
+
+```
+0x10000000  載入器 或 跳板（16KB，兩者擇一）
+0x10004000  PicoApple2 本體（最前面就是向量表）
+```
+
+不能只是把檔案往後搬。RP2040 是 XIP，所有位址在編譯時就寫死在機器碼裡了，搬 bytes 只會讓每個指標都指向錯的地方。
+
+### 這個專案改造時的三件事
+
+改造流程照 loader repo 的 README §3.4 檢查清單走。對 PicoApple2 來說：
+
+**① 換 linker script — 但這裡不是 pico-sdk 專案**
+
+清單假設的是 pico-sdk + CMake（`pico_set_linker_script`）。PicoApple2 走的是 arduino-cli + arduino-pico，機制完全不同：linker script 是 build 期由 `simplesub.py` 從 `lib/rp2040/memmap_default.ld` 生成到 `{build.path}/memmap_default.ld`，而 link 指令寫死讀那個檔名。
+
+所以正確的換法不是加 `-Wl,--script`（會跟寫死的那個打架），而是覆蓋 platform.txt 的 prelink hook，把它的 `--input` 指到我們的偏移版樣板。`build_offset.bat` 的第 4 步就是在做這件事。
+
+偏移版樣板由 `loader_offset/gen_app_ld.py` 從 arduino-pico 自己那份生成，**不要手改**。換 arduino-pico 版本就重跑（`build_offset.bat` 每次都會重跑一次）。
+
+**② ⚠️ arduino-pico 的向量表不在 image 最前面 —— infones 沒遇過的坑**
+
+這是改造這個專案時最關鍵的一件事。arduino-pico 預設編譯出來的實測佈局是：
+
+| 位址 | 段 | 大小 |
+|---|---|---|
+| `0x10000000` | `.boot2` | 256 |
+| `0x10000100` | `.ota` | `0x27f4` |
+| `0x100028f4` | `.partition` | `0x70c` |
+| `0x10003000` | `.text`（向量表從這裡才開始） | |
+
+也就是說 arduino-pico 一律先經過一段 OTA 前導程式才進本體，ROM/boot2 跳的是 `0x10000100` 而不是向量表。
+
+而載入器與跳板是**直接讀 `APP_BASE` 的向量表（SP + Reset）然後跳**。如果只把 `ORIGIN` 改成 `0x10004000` 而留著這兩段，向量表會落在 `0x10007000`，載入器跳到 `0x10004000` 只會拿到 OTA blob 的頭幾個 byte 當堆疊指標——開機直接死，**而且症狀跟「根本沒燒進去」一模一樣**。
+
+本專案不用 OTA、不用 LittleFS（磁碟映像走 SD 卡），所以 `.boot2` / `.ota` / `.partition` 三段一起丟掉。丟掉之後 `0x10004000` 第一個 byte 就是向量表，跟 infones 的偏移版同形。
+
+丟輸出段還不夠：`ota.o` 與 `boot2.o` 是 link 指令寫死拉進來的，輸入段不明確 discard 的話 ld 會把它們當 orphan 隨手安置，很可能就塞在向量表前面。`gen_app_ld.py` 因此補了一段 `/DISCARD/`。
+
+**③ 寫死的 flash 位址 —— 這一項不適用**
+
+清單裡最難查的第 ③ 項（專題自己在 flash 劃地盤存 ROM／存檔／資源，位址不會跟著位移）在這裡是空的。PicoApple2 的磁碟映像與存檔全部走 SD 卡，flash 上只有 image 本身。grep 過 `.c` / `.cpp` / `.h` / `.ino` / `.rs` 全部沒有寫死的 `0x10xxxxxx`、沒有 `flash_range_*`、沒有 EEPROM / LittleFS。
+
+這也是 infones（`NES_FILE_ADDR` 撞上存檔槽）跟這裡最大的差別。
+
+**④ build 期佈局檢查**
+
+`loader_offset/check_flash_layout.py`，`build_offset.bat` 第 5 步自動跑。因為第 ③ 項不適用，它守的不是「資料區重疊」而是上面第 ② 項：向量表是否正好在 `0x10004000`、SP/Reset 是否通得過載入器的 `app_present()`、UF2 是否連續、image 尾端有沒有越過 flash 可用上限。
+
+### Rust 核心不需要任何改動
+
+`apple2_core` 只產出 `libapple2_core.a`（staticlib，沒有自己的 linker script、沒有 `.cargo/config.toml`、沒有寫死的位址），所有位址都由 arduino-pico 的 linker script 決定。偏移編譯對 Rust 那邊是透明的，**`build_offset.bat` 跟 `full_build.bat` 用的是同一份 `.a`**。
+
+### 實測數字（arduino-pico 5.6.1 / rpipico 2MB）
+
+| | 預設編譯 | 偏移編譯 |
+|---|---|---|
+| image 起點 | `0x10000000` | `0x10004000` |
+| 向量表 | `0x10003000` | `0x10004000` |
+| image 大小 | 177,540 bytes | 177,284 bytes |
+| image 尾端 | — | `0x10030e00` |
+| 上限（EEPROM 區起點） | `0x101ff000` | `0x101ff000` |
+| 餘裕 | — | 1,892,864 bytes |
+
+空間非常寬裕，偏移 16KB 對這個專案沒有壓力（DOOM 那邊才是緊的）。
+
+### 驗證狀態
+
+**已實機驗證（2026-08-15）**：
+
+*   **跳板路線**：`PicoApple2_standalone.uf2` 用 `picotool load -v -x` 燒進掌機，開機進入 Apple II 畫面，**字形正常**（字元 ROM 的顯示路徑一併確認）。
+*   **載入器路線**：`loader.uf2` 燒進掌機、standalone 版放 SD 卡根目錄，冷開機 → 載入器選單 → 選檔 → 燒錄 → 交棒 → Apple II 畫面。
+
+也就是說底層假設全部成立：偏移編譯、丟掉 `.boot2` / `.ota` / `.partition`、向量表落在 `0x10004000`、交棒，以及同一份 UF2 兩種燒法都吃得下。
+
+**尚未驗證**：
+
+*   磁碟映像相關的路徑（DOS 3.3 開機、`LOAD` / `SAVE`）在偏移模式下沒有回歸測過。理論上不受影響——`.dsk` 全走 SD 卡，flash 佈局改動碰不到它。
+*   燒錄中途失敗、UF2 損毀等錯誤路徑。
+
+### 燒錄與注意事項
+
+```bash
+picotool load -v -x build_offset\PicoApple2_standalone.uf2
+```
+
+*   `-v` 會逐塊驗證。開發時建議用它而不是拖曳——位址不連續的 UF2 拖曳會安靜截斷（loader README §3.5 坑 3；`merge_uf2.py` 已經用 `0xFF` 補過空隙，但 `-v` 仍然比較好查）。
+*   `picotool load -x` 與 `picotool reboot` 都是**軟重置**，載入器會直接穿透到 app、不顯示選單。要看選單就燒完不加 `-x`，然後**拔電冷開機**。
+*   `build_offset\PicoApple2.ino.uf2`（沒有 `_standalone`）是只有本體的版本，前 16KB 是空的，**不能單獨燒錄**。
+
+---
+
 ## 🖥️ 專業虛擬終端機 (Pro Console)
 
 本專案內建一個基於 **WebSerial** 的高效能虛擬控制台，讓您可以透過電腦鍵盤完美模擬 Apple II 的所有操作。
@@ -186,6 +291,10 @@
 *   `check_env.bat`: 環境驗證工具。
 *   `Apple2Core.h`: C/Rust FFI 接口定義。
 *   `src/`: 存放編譯後的 `libapple2_core.a` 靜態庫。
+*   `build_offset.bat`: 偏移編譯（搭配 rp2040-retro-loader），見上面「搭配開機載入器」一章。
+*   `loader_offset/gen_app_ld.py`: 從 arduino-pico 的 `memmap_default.ld` 生成偏移版 linker script。
+*   `loader_offset/memmap_app_arduino.ld`: **生成的，不要手改**（改 arduino-pico 版本就重跑上面那支）。
+*   `loader_offset/check_flash_layout.py`: 偏移編譯的 build 期佈局檢查。
 
 ---
 
