@@ -81,11 +81,26 @@ void TFT_DMA::fillScreen(uint16_t color) {
     drawRect(0, 0, 320, 240, color);
 }
 
+// 整列緩衝：一次填滿一整行像素再送出，取代每像素一次 spi_write_blocking。
+// 320 px * 2 byte = 640 byte，放 .bss 不吃堆疊。
+static uint8_t s_line_buf[320 * 2];
+
 void TFT_DMA::drawRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color) {
+    if (w == 0 || h == 0) return;
+    uint16_t line_w = w > 320 ? 320 : w;
+    for (uint16_t i = 0; i < line_w; i++) {
+        s_line_buf[i * 2]     = (uint8_t)(color >> 8);
+        s_line_buf[i * 2 + 1] = (uint8_t)(color & 0xFF);
+    }
+
     startFrame(x, y, x + w - 1, y + h - 1);
-    uint8_t buf[2] = { (uint8_t)(color >> 8), (uint8_t)(color & 0xFF) };
-    for (uint32_t i = 0; i < (uint32_t)w * h; i++) {
-        spi_write_blocking(_spi, buf, 2);
+    for (uint32_t row = 0; row < h; row++) {
+        uint16_t remain = w;
+        while (remain) {
+            uint16_t n = remain > line_w ? line_w : remain;
+            spi_write_blocking(_spi, s_line_buf, n * 2);
+            remain -= n;
+        }
     }
     gpio_put(_cs, 1);
 }
@@ -96,16 +111,22 @@ void TFT_DMA::drawChar(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t 
     if (char_idx >= 32 && char_idx <= 63) char_idx += 64;
     else if (char_idx >= 96) char_idx -= 32;
 
-    startFrame(x, y, x + 6, y + 7);
-    uint8_t c_buf[2] = { (uint8_t)(color >> 8), (uint8_t)(color & 0xFF) };
-    uint8_t b_buf[2] = { (uint8_t)(bg >> 8), (uint8_t)(bg & 0xFF) };
+    // 整個字元 7x8 = 56 px = 112 byte，組完一次送出（原本是 56 次 2-byte 呼叫）
+    uint8_t glyph[7 * 8 * 2];
+    uint8_t hi_c = (uint8_t)(color >> 8), lo_c = (uint8_t)(color & 0xFF);
+    uint8_t hi_b = (uint8_t)(bg >> 8),    lo_b = (uint8_t)(bg & 0xFF);
 
+    uint8_t* p = glyph;
     for (int row = 0; row < 8; row++) {
         uint8_t bits = font_rom[char_idx * 8 + row];
         for (int col = 0; col < 7; col++) {
             bool pixel = (bits & (1 << (6 - col))) != 0;
-            spi_write_blocking(_spi, pixel ? c_buf : b_buf, 2);
+            *p++ = pixel ? hi_c : hi_b;
+            *p++ = pixel ? lo_c : lo_b;
         }
     }
+
+    startFrame(x, y, x + 6, y + 7);
+    spi_write_blocking(_spi, glyph, sizeof(glyph));
     gpio_put(_cs, 1);
 }

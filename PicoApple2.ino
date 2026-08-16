@@ -252,6 +252,18 @@ String g_pending_load_name;          // core1→core0：欲載入的「確切檔
 volatile bool req_menu_root_reset = false; // core1→core0：關閉並重置目錄列舉游標
 // 目錄列舉游標：選單期間保持 root 開啟，往下捲動只需前進(O(1))，免每換頁從頭重掃(O(n))。core0 專用。
 File g_menu_root; bool g_menu_root_open = false; int g_menu_root_pos = 0;
+// 檔名快取：比可視頁大，讓「單列捲動」不必倒帶重掃目錄。
+// 為什麼需要：往下按一列時可視頁只前進 1，但目錄游標已停在 base+13(讀完整頁)，
+// 於是 base+1 < g_menu_root_pos 成立而觸發 rewindDirectory + 從第 0 筆快轉到 base
+// ——每按一次就 O(base) 次 openNextFile，清單越後面越慢。有了快取，上下捲動都在
+// RAM 命中，只有跨出快取範圍才碰 SD。仍不在 RAM 全存清單，檔案數依舊無上限。
+#define MENU_CACHE_ROWS 40
+String menu_cache[MENU_CACHE_ROWS];
+int menu_cache_base = 0;             // menu_cache[0] 對應的全域 index
+int menu_cache_count = 0;            // 快取內有效筆數
+// 不變式：g_menu_root_pos == menu_cache_base + menu_cache_count
+//         （目錄游標永遠停在快取最後一筆的下一筆）
+static void menuCacheReset() { for (int i = 0; i < MENU_CACHE_ROWS; i++) menu_cache[i] = ""; menu_cache_base = 0; menu_cache_count = 0; }
 
 volatile bool req_scan_disks = false;
 volatile bool ack_scan_disks = false;
@@ -427,9 +439,9 @@ void scanDiskFiles() {
 }
 
 // 目錄列舉游標管理(core0 專用)。選單期間保持 root 開啟，避免每換頁都 SD.open+從頭重掃。
-static void menuRootClose() { if (g_menu_root_open) { g_menu_root.close(); g_menu_root_open = false; } g_menu_root_pos = 0; }
+static void menuRootClose() { if (g_menu_root_open) { g_menu_root.close(); g_menu_root_open = false; } g_menu_root_pos = 0; menuCacheReset(); }
 static bool menuRootEnsure() {
-  if (!g_menu_root_open) { g_menu_root = SD.open("/"); g_menu_root_open = (bool)g_menu_root; g_menu_root_pos = 0; }
+  if (!g_menu_root_open) { g_menu_root = SD.open("/"); g_menu_root_open = (bool)g_menu_root; g_menu_root_pos = 0; menuCacheReset(); }
   return g_menu_root_open;
 }
 // 取得目錄中下一個「可載入磁碟檔」的檔名，游標前進一筆。回傳是否取到。
@@ -444,16 +456,46 @@ static bool menuRootNext(String& out) {
 }
 
 // 把從 base 起的一個可視頁(最多 MENU_VISIBLE_ROWS 筆)檔名讀進 disk_window[]。core0 專用。
-// 往下捲動時 base 單調遞增 → 只前進游標(免重掃)；往回捲超出游標才 rewind。
+// 先命中 menu_cache[]；只有 base 落在快取之前(往回捲超出快取)才 rewind 重掃。
 void fillDiskWindow(int base) {
   for (int k = 0; k < MENU_VISIBLE_ROWS; k++) disk_window[k] = "";
+  if (base < 0) base = 0;
   if (!menuRootEnsure()) return;
-  if (base < g_menu_root_pos) { g_menu_root.rewindDirectory(); g_menu_root_pos = 0; } // 需往回 → 倒帶
   String name;
-  while (g_menu_root_pos < base) { if (!menuRootNext(name)) return; g_menu_root_pos++; } // 快轉到 base
+
+  // 1) 需要的起點在快取之前 → 只能倒帶，並把快取重新錨在 base
+  if (base < menu_cache_base) {
+    g_menu_root.rewindDirectory(); g_menu_root_pos = 0;
+    for (int i = 0; i < MENU_CACHE_ROWS; i++) menu_cache[i] = "";
+    menu_cache_base = 0; menu_cache_count = 0;
+    while (g_menu_root_pos < base) {
+      if (!menuRootNext(name)) { menu_cache_base = g_menu_root_pos; return; }  // 目錄比預期短
+      g_menu_root_pos++;
+    }
+    menu_cache_base = base;
+  }
+
+  // 2) 往前補讀，直到快取涵蓋 [base, base+MENU_VISIBLE_ROWS)
+  int need_end = base + MENU_VISIBLE_ROWS;
+  while (menu_cache_base + menu_cache_count < need_end) {
+    if (menu_cache_count >= MENU_CACHE_ROWS) {          // 快取滿 → 丟掉 base 之前用不到的舊筆數
+      int drop = base - menu_cache_base;
+      if (drop <= 0) break;                             // MENU_VISIBLE_ROWS < MENU_CACHE_ROWS，理論上到不了
+      if (drop > menu_cache_count) drop = menu_cache_count;
+      for (int i = 0; i + drop < menu_cache_count; i++) menu_cache[i] = menu_cache[i + drop];
+      for (int i = menu_cache_count - drop; i < MENU_CACHE_ROWS; i++) menu_cache[i] = "";
+      menu_cache_base += drop; menu_cache_count -= drop;
+    }
+    if (!menuRootNext(name)) break;                     // 目錄讀完
+    menu_cache[menu_cache_count] = name;
+    menu_cache_count++; g_menu_root_pos++;
+  }
+
+  // 3) 從快取切出可視頁
+  int off = base - menu_cache_base;
   for (int k = 0; k < MENU_VISIBLE_ROWS; k++) {
-    if (!menuRootNext(name)) break;
-    disk_window[k] = name; g_menu_root_pos++;
+    int ci = off + k;
+    if (ci >= 0 && ci < menu_cache_count) disk_window[k] = menu_cache[ci];
   }
 }
 
