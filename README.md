@@ -124,6 +124,8 @@
 
 產出 `build_offset\PicoApple2_standalone.uf2`。這個檔案兩種用法都吃得下：放進 SD 卡根目錄給載入器，或直接用 USB 燒進去。**平常開發不受影響**——`full_build.bat` 完全沒動，偏移模式是另一支獨立的腳本。
 
+這支腳本**不需要你在 Arduino sketchbook 裡安裝 `Apple2Core` 程式庫**，它會自己生成一份（見下面「不依賴 sketchbook」）。
+
 ### 為什麼要重新編譯
 
 載入器住在 flash 最前面 16KB（ROM 只認那裡），所以專題本體必須讓開：
@@ -143,7 +145,7 @@
 
 清單假設的是 pico-sdk + CMake（`pico_set_linker_script`）。PicoApple2 走的是 arduino-cli + arduino-pico，機制完全不同：linker script 是 build 期由 `simplesub.py` 從 `lib/rp2040/memmap_default.ld` 生成到 `{build.path}/memmap_default.ld`，而 link 指令寫死讀那個檔名。
 
-所以正確的換法不是加 `-Wl,--script`（會跟寫死的那個打架），而是覆蓋 platform.txt 的 prelink hook，把它的 `--input` 指到我們的偏移版樣板。`build_offset.bat` 的第 4 步就是在做這件事。
+所以正確的換法不是加 `-Wl,--script`（會跟寫死的那個打架），而是覆蓋 platform.txt 的 prelink hook，把它的 `--input` 指到我們的偏移版樣板。`build_offset.bat` 的第 5 步就是在做這件事。
 
 偏移版樣板由 `loader_offset/gen_app_ld.py` 從 arduino-pico 自己那份生成，**不要手改**。換 arduino-pico 版本就重跑（`build_offset.bat` 每次都會重跑一次）。
 
@@ -174,7 +176,30 @@
 
 **④ build 期佈局檢查**
 
-`loader_offset/check_flash_layout.py`，`build_offset.bat` 第 5 步自動跑。因為第 ③ 項不適用，它守的不是「資料區重疊」而是上面第 ② 項：向量表是否正好在 `0x10004000`、SP/Reset 是否通得過載入器的 `app_present()`、UF2 是否連續、image 尾端有沒有越過 flash 可用上限。
+`loader_offset/check_flash_layout.py`，`build_offset.bat` 第 6 步自動跑。因為第 ③ 項不適用，它守的不是「資料區重疊」而是上面第 ② 項：向量表是否正好在 `0x10004000`、SP/Reset 是否通得過載入器的 `app_present()`、UF2 是否連續、image 尾端有沒有越過 flash 可用上限。
+
+### 不依賴 sketchbook
+
+`build_offset.bat` 的第 3 步會生成一份自足的 `Apple2Core` 程式庫給 arduino-cli 用：
+
+```
+build_offset\arduino_libs\Apple2Core\
+    library.properties                    生成（precompiled=true + ldflags）
+    src\Apple2Core.h                      從 repo 根目錄的 Apple2Core.h 複製
+    src\cortex-m0plus\libapple2_core.a    從這次剛編好的 Rust 產出複製
+```
+
+`--libraries` 只指向這裡。sketch 用到的其他程式庫（SPI / SD / SDFS / SdFat）都隨 rp2040 平台附帶，所以**整個 build 不碰 Arduino sketchbook 一根寒毛**。
+
+**為什麼要這樣做。** 原本的依賴鏈是「`arduino-cli.yaml` 的 `user:` → `scan_env.ps1` 掃出路徑 → 那底下要有手工維護的 `Apple2Core` → 它的 `src/` 底下要有最新的 `.h` 與 `.a`」。這條鏈斷過三次，而且每次的症狀都不像環境問題：
+
+1. sketchbook 搬到另一顆磁碟後 `arduino-cli.yaml` 還指著舊路徑 → `Apple2Core.h: No such file or directory`
+2. 搬家時 `src/` 沒跟著搬，只剩 `library.properties` → 同樣的錯誤訊息
+3. `src/cortex-m0plus/` 底下的 `.a` 過期，連結器照用不誤 → 修正沒進韌體，而且完全沒有警告（`PROGRESS.md` 有記這一次，查了很久）
+
+生成的話這三個都不可能發生：`.h` 只有 repo 根目錄一個來源，`.a` 永遠是這次剛編的，路徑固定。
+
+**順帶修掉一個長期的坑。** repo 根目錄的 `library.properties` 原本寫 `dot_a_linkage=true`，那是壞的——它會叫 arduino-cli 去找一個「由本程式庫自己的原始碼編出來的」`Apple2Core.a`，而這個程式庫沒有原始碼。真正能動的 `precompiled=true` + `ldflags=-lapple2_core` 當年只改在某台機器的 sketchbook 裡，從來沒回流到 repo。現在兩邊都是能動的版本，而且以 `make_arduino_lib.py` 為準。
 
 ### Rust 核心不需要任何改動
 
@@ -201,6 +226,10 @@
 *   **載入器路線**：`loader.uf2` 燒進掌機、standalone 版放 SD 卡根目錄，冷開機 → 載入器選單 → 選檔 → 燒錄 → 交棒 → Apple II 畫面。
 
 也就是說底層假設全部成立：偏移編譯、丟掉 `.boot2` / `.ota` / `.partition`、向量表落在 `0x10004000`、交棒，以及同一份 UF2 兩種燒法都吃得下。
+
+**`build_offset.bat` 本身**（2026-08-16）：在乾淨的環境下完整跑完 7 個步驟，產出 782 塊的合併 UF2，拆開驗證 `APP_BASE` 以下 64 塊、以上 718 塊、位址斷點 0 個。
+
+> 上面那次實機驗證用的韌體，是在腳本尚未自足時用等效指令手動編出來的——當時 sketchbook 路徑已經壞了，腳本自己跑不完。韌體本身是對的（你燒過會動），但「腳本能不能自己跑完」直到 08-16 才真正驗證。
 
 **尚未驗證**：
 
@@ -292,6 +321,7 @@ picotool load -v -x build_offset\PicoApple2_standalone.uf2
 *   `Apple2Core.h`: C/Rust FFI 接口定義。
 *   `src/`: 存放編譯後的 `libapple2_core.a` 靜態庫。
 *   `build_offset.bat`: 偏移編譯（搭配 rp2040-retro-loader），見上面「搭配開機載入器」一章。
+*   `loader_offset/make_arduino_lib.py`: build 期生成自足的 `Apple2Core` 程式庫，讓編譯不依賴 Arduino sketchbook。
 *   `loader_offset/gen_app_ld.py`: 從 arduino-pico 的 `memmap_default.ld` 生成偏移版 linker script。
 *   `loader_offset/memmap_app_arduino.ld`: **生成的，不要手改**（改 arduino-pico 版本就重跑上面那支）。
 *   `loader_offset/check_flash_layout.py`: 偏移編譯的 build 期佈局檢查。

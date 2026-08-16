@@ -41,9 +41,9 @@ call "%SCRIPT_DIR%build_env.bat"
 
 set "RUST_PROJECT_DIR=%PROJECT_ROOT%apple2_core"
 set "ARDUINO_CLI=%ARDUINO_CLI_PATH%"
-set "CUSTOM_LIB_PATH=%ARDUINO_USER_LIB_PATH%"
 set "OUT_DIR=%PROJECT_ROOT%build_offset"
 set "OFFSET_LD=%PROJECT_ROOT%loader_offset\memmap_app_arduino.ld"
+set "GEN_LIB_DIR=%OUT_DIR%\arduino_libs"
 
 if "%~1"=="" (
     set "LOADER_PATH=%PROJECT_ROOT%..\rp2040-retro-loader"
@@ -58,7 +58,7 @@ if not exist "!LOADER_PATH!\tools\merge_uf2.py" (
 
 echo.
 echo ========================================================
-echo [1/6] Compiling Rust Core...
+echo [1/7] Compiling Rust Core...
 echo ========================================================
 cd /d "%RUST_PROJECT_DIR%"
 cargo build --target thumbv6m-none-eabi --release
@@ -66,7 +66,7 @@ if %errorlevel% neq 0 ( echo [ERROR] Rust failed. & pause & exit /b 1 )
 
 echo.
 echo ========================================================
-echo [2/6] Syncing Library to Project Local...
+echo [2/7] Syncing Library to Project Local...
 echo ========================================================
 if not exist "%PROJECT_ROOT%src" mkdir "%PROJECT_ROOT%src"
 copy /y "%RUST_PROJECT_DIR%\target\thumbv6m-none-eabi\release\libapple2_core.a" "%PROJECT_ROOT%src\libapple2_core.a"
@@ -74,24 +74,41 @@ echo [OK] Static library synced to local src/
 
 echo.
 echo ========================================================
-echo [3/6] Generating offset linker script...
+echo [3/7] Generating self-contained Apple2Core library...
 echo ========================================================
+:: This build does NOT use the Arduino sketchbook's Apple2Core library.
+:: That dependency broke three times (sketchbook moved to another drive, src/
+:: left behind, stale .a silently linked) and every failure looked like
+:: something other than an environment problem. The library is generated here
+:: instead, from the repo's own Apple2Core.h and the .a just built above.
+:: See loader_offset/make_arduino_lib.py for the full reasoning.
 cd /d "%PROJECT_ROOT%"
+python "%PROJECT_ROOT%loader_offset\make_arduino_lib.py" "%GEN_LIB_DIR%" "%PROJECT_ROOT%src\libapple2_core.a"
+if %errorlevel% neq 0 ( echo [ERROR] make_arduino_lib.py failed. & pause & exit /b 1 )
+
+echo.
+echo ========================================================
+echo [4/7] Generating offset linker script...
+echo ========================================================
 python "%PROJECT_ROOT%loader_offset\gen_app_ld.py"
 if %errorlevel% neq 0 ( echo [ERROR] gen_app_ld.py failed. & pause & exit /b 1 )
 
 echo.
 echo ========================================================
-echo [4/6] Compiling Arduino Sketch (OFFSET, link at 0x10004000)...
+echo [5/7] Compiling Arduino Sketch (OFFSET, link at 0x10004000)...
 echo ========================================================
-:: Two build-property overrides, each load-bearing:
+:: --libraries points ONLY at the generated library from step 3. Everything
+:: else the sketch includes (SPI, SD, SDFS, SdFat) ships with the rp2040
+:: platform, so nothing from the user's sketchbook is needed and nothing from
+:: it can break this build.
 ::
-:: compiler.libraries.ldflags
-::     The Rust .a must sit inside the link command's --start-group AND after
-::     the sketch objects; otherwise ld reaches it before anything wants those
-::     symbols and skips the whole archive (symptom: a wall of "undefined
-::     reference to apple2_*"). Of the properties platform.txt exposes, only
-::     this one lands in the right place.
+:: The Rust .a is linked via the generated library's "ldflags=-lapple2_core"
+:: (precompiled library mechanism), which arduino-cli places inside the link
+:: command's --start-group and after the sketch objects. That position is
+:: load-bearing: an archive listed before the objects that need its symbols is
+:: skipped entirely by ld, giving a wall of "undefined reference to apple2_*".
+::
+:: One build-property override remains:
 ::
 :: recipe.hooks.linking.prelink.1.pattern
 ::     arduino-pico generates its linker script at build time: simplesub.py
@@ -101,22 +118,21 @@ echo ========================================================
 ::     -Wl,--script (it would fight the hardcoded one) but to repoint this
 ::     hook's --input at our offset template. Every other argument is copied
 ::     verbatim from platform.txt.
-"%ARDUINO_CLI%" compile --fqbn %FQBN% --libraries "%CUSTOM_LIB_PATH%" ^
-    --build-property "compiler.libraries.ldflags=%PROJECT_ROOT%src\libapple2_core.a" ^
+"%ARDUINO_CLI%" compile --fqbn %FQBN% --libraries "%GEN_LIB_DIR%" ^
     --build-property "recipe.hooks.linking.prelink.1.pattern=\"{runtime.tools.pqt-python3.path}/python3\" -I \"{runtime.platform.path}/tools/simplesub.py\" --input \"%OFFSET_LD%\" --out \"{build.path}/memmap_default.ld\" --sub __FLASH_LENGTH__ {build.flash_length} --sub __EEPROM_START__ {build.eeprom_start} --sub __FS_START__ {build.fs_start} --sub __FS_END__ {build.fs_end} --sub __RAM_LENGTH__ {build.ram_length} --sub __PSRAM_LENGTH__ {build.psram_length}" ^
     --output-dir "%OUT_DIR%" "PicoApple2.ino"
 if %errorlevel% neq 0 ( echo [ERROR] Arduino build failed. & pause & exit /b 1 )
 
 echo.
 echo ========================================================
-echo [5/6] Checking flash layout...
+echo [6/7] Checking flash layout...
 echo ========================================================
 python "%PROJECT_ROOT%loader_offset\check_flash_layout.py" "%OUT_DIR%\PicoApple2.ino.uf2"
 if %errorlevel% neq 0 ( echo [ERROR] Layout check failed - do not flash this file. & pause & exit /b 1 )
 
 echo.
 echo ========================================================
-echo [6/6] Merging with trampoline...
+echo [7/7] Merging with trampoline...
 echo ========================================================
 if not exist "!LOADER_PATH!\build\trampoline.uf2" (
     echo [ERROR] "!LOADER_PATH!\build\trampoline.uf2" not found.
