@@ -203,18 +203,28 @@ uint8_t popKey() {
 bool hasKey() {
   return (g_paste_head != g_paste_tail) || (g_pending_key != 0);
 }
-const char keymap_base[8][8] = {
+// 8x8 掃描矩陣 → 鍵碼。2026-08-22 以 PicoApple2-KeyboardTester 實機逐鍵量測校正，
+// 64 顆實體鍵一對一佔滿 64 格。修正前有四組錯位（S/X 對調、'/' 與 '=' 被搖桿鈕
+// 213/214 佔位而錯置到 PGUP/PGDN 上），以及 TAB/CAPS/DEL 三顆無主的鍵。
+//
+// 值 >= 202 為偽碼，由下方 scan_matrix() 的轉換鏈解讀：
+//   202 Shift   203 Enter   204 BackSpace   205 Ctrl   206 Tab   207 Esc
+//   208 CapsLock            209/210/211/212 上/下/左/右
+//   213/214 搖桿鈕 0/1（實體上是 PGUP / PGDN）
+// Fn 在 [3][7]、ALT 在 [7][7]，兩者表中為 0：Fn 由 isFnPressed 另外處理，
+// ALT 目前無作用（面板上的 BTN_ALT 是獨立 GPIO，與此無關）。
+const uint8_t keymap_base[8][8] = {
   { '1', '3', '5', '7', '9', '-', 206, 204 }, { 'q', 'e', 't', 'u', 'o', '[', 207, '\\' },
   { 'a', 'd', 'g', 'j', 'l', '\'', 205, 208 }, { 'z', 'c', 'b', 'm', '.', 202, 210, 0 },
-  { '2', '4', '6', '8', '0', 214, '`', 0 }, { 'w', 'r', 'y', 'i', 'p', ']', 209, '/' },
-  { 'x', 'f', 'h', 'k', ';', 203, 212, '=' }, { 's', 'v', 'n', ',', 213, ' ', 211, 0 }
+  { '2', '4', '6', '8', '0', '=', '`', 0x7F }, { 'w', 'r', 'y', 'i', 'p', ']', 209, 213 },
+  { 's', 'f', 'h', 'k', ';', 203, 212, 214 }, { 'x', 'v', 'n', ',', '/', ' ', 211, 0 }
 };
 
-const char keymap_shift[8][8] = {
+const uint8_t keymap_shift[8][8] = {
   { '!', '#', '%', '&', '(', '_', 206, 204 }, { 'Q', 'E', 'T', 'U', 'O', '{', 207, '|' },
   { 'A', 'D', 'G', 'J', 'L', '"', 205, 208 }, { 'Z', 'C', 'B', 'M', '>', 202, 210, 0 },
-  { '@', '$', '^', '*', ')', 214, '~', 0 }, { 'W', 'R', 'Y', 'I', 'P', '}', 209, '?' },
-  { 'X', 'F', 'H', 'K', ':', 203, 212, '+' }, { 'S', 'V', 'N', '<', 213, ' ', 211, 0 }
+  { '@', '$', '^', '*', ')', '+', '~', 0x7F }, { 'W', 'R', 'Y', 'I', 'P', '}', 209, 213 },
+  { 'S', 'F', 'H', 'K', ':', 203, 212, 214 }, { 'X', 'V', 'N', '<', '?', ' ', 211, 0 }
 };
 
 File diskFile;
@@ -796,7 +806,7 @@ void scan_matrix() {
   fastWrite(CLOCK_PIN, 1); delayMicroseconds(2); fastWrite(CLOCK_PIN, 0);
   
   bool mat_joy_up = false, mat_joy_down = false, mat_joy_left = false, mat_joy_right = false, mat_joy_btn0 = false, mat_joy_btn1 = false;
-  for (int r = 0; r < 8; r++) { for (int c = 0; c < 8; c++) { if (keyState[r][c]) { uint8_t k = (uint8_t)keymap_base[r][c]; if (k == 209) mat_joy_up = true; if (k == 210) mat_joy_down = true; if (k == 211) mat_joy_left = true; if (k == 212) mat_joy_right = true; if (k == 213) mat_joy_btn0 = true; if (k == 214) mat_joy_btn1 = true; } } }
+  for (int r = 0; r < 8; r++) { for (int c = 0; c < 8; c++) { if (keyState[r][c]) { uint8_t k = keymap_base[r][c]; if (k == 209) mat_joy_up = true; if (k == 210) mat_joy_down = true; if (k == 211) mat_joy_left = true; if (k == 212) mat_joy_right = true; if (k == 213) mat_joy_btn0 = true; if (k == 214) mat_joy_btn1 = true; } } }
   
   bool raw_up = (digitalRead(BTN_UP) == LOW) || ((g_joy_mode || g_show_menu) && mat_joy_up);
   bool raw_down = (digitalRead(BTN_DOWN) == LOW) || ((g_joy_mode || g_show_menu) && mat_joy_down);
@@ -857,11 +867,19 @@ void scan_matrix() {
         if (r == 3 && c == 7) { isFnPressed = p; continue; }
         if (r == 3 && c == 5 || r == 2 && c == 6) continue;
         if (p) {
-          uint8_t k = isShiftPressed ? (uint8_t)keymap_shift[r][c] : (uint8_t)keymap_base[r][c];
-          if (isFnPressed && k == '1') g_f_key_event = 1; else if (isFnPressed && (k == '2' || k == '@')) g_f_key_event = 2; else if (isFnPressed && (k == '3' || k == '#')) g_f_key_event = 3; else if (isFnPressed && (k == '4' || k == '$')) g_f_key_event = 4; else if (isFnPressed && (k == '5' || k == '%')) g_f_key_event = 5;
-          else if (isFnPressed && (k == 'c' || k == 'C')) { g_caps_lock = !g_caps_lock; }
+          uint8_t k = isShiftPressed ? keymap_shift[r][c] : keymap_base[r][c];
+          if (isFnPressed) {
+            // Fn+1~9 = F1~F9、Fn+0 = F10（F11/F12 未定義）。目前只有 F1~F5 有動作，
+            // 其餘一樣吃掉不送鍵 —— 否則 Fn+6 會漏出一個 '6' 給模擬器。
+            // 判斷用不帶 Shift 的 keymap_base，省掉一整串 '2'/'@' 的成對比對。
+            uint8_t kb = keymap_base[r][c];
+            if (kb >= '1' && kb <= '5') g_f_key_event = kb - '0';
+            else if (kb == 'c') g_caps_lock = !g_caps_lock;   // Fn+C
+          }
           else {
             if (k >= 209 && k <= 214) { if (!g_joy_mode && k <= 212) { if (k == 209) k = 0x0B; else if (k == 210) k = 0x0A; else if (k == 211) k = 0x08; else if (k == 212) k = 0x15; } else k = 0; } else if (k == 203) k = 0x0D; else if (k == 207) k = 0x1B; else if (k == 204) k = 0x08;
+            else if (k == 206) k = 0x09;                       // Tab
+            else if (k == 208) { g_caps_lock = !g_caps_lock; k = 0; } // CapsLock 鍵
             else if (isCtrlPressed) { if (k >= 'a' && k <= 'z') k = (k - 32) & 0x1F; else if (k >= '@' && k <= '_') k = k & 0x1F; else k = 0; }
             else { if (g_caps_lock && !isShiftPressed && k >= 'a' && k <= 'z') k -= 32; else if (g_caps_lock && isShiftPressed && k >= 'A' && k <= 'Z') k += 32; }
             if (k > 0) { if (!g_show_menu) pushHardwareKey(k); else { if (k == 0x0D) g_menu_cmd = 3; else if (k == 0x1B) g_menu_cmd = 4; } }
