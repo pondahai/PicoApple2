@@ -12,7 +12,6 @@ call "%SCRIPT_DIR%build_env.bat"
 set "FQBN=%FQBN%"
 set "RUST_PROJECT_DIR=%PROJECT_ROOT%apple2_core"
 set "ARDUINO_CLI=%ARDUINO_CLI_PATH%"
-set "CUSTOM_LIB_PATH=%ARDUINO_USER_LIB_PATH%"
 set "PICOTOOL=%PICOTOOL_PATH%"
 
 echo ========================================================
@@ -23,19 +22,31 @@ cargo build --target thumbv6m-none-eabi --release
 if %errorlevel% neq 0 ( echo [ERROR] Rust failed. & pause & exit /b )
 
 echo.
-echo [2/4] Syncing Library to Project Local...
+echo [2/4] Generating self-contained Apple2Core library...
 echo ========================================================
+:: Do NOT depend on the sketchbook Apple2Core library. That chain broke four
+:: times (Dropbox -> Google Drive move, src/ left behind, stale .a silently
+:: linked). Generated here instead: .h from the repo root (single source of
+:: truth), .a from the build above. See loader_offset/make_arduino_lib.py.
+cd /d "%PROJECT_ROOT%"
+set "OUT_DIR=%PROJECT_ROOT%build"
+if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"
+set "GEN_LIB_DIR=%PROJECT_ROOT%build\arduino_libs"
+python "%PROJECT_ROOT%loader_offset\make_arduino_lib.py" "%GEN_LIB_DIR%" ^
+    "%RUST_PROJECT_DIR%\target\thumbv6m-none-eabi\release\libapple2_core.a"
+if %errorlevel% neq 0 ( echo [ERROR] Library generation failed. & pause & exit /b )
+
+:: Keep a copy in src/ for other scripts / manual linking
 if not exist "%PROJECT_ROOT%src" mkdir "%PROJECT_ROOT%src"
 copy /y "%RUST_PROJECT_DIR%\target\thumbv6m-none-eabi\release\libapple2_core.a" "%PROJECT_ROOT%src\libapple2_core.a"
-echo [OK] Static library synced to local src/
+echo [OK] Library generated to build\arduino_libs
 
 echo.
-echo [3/4] Compiling Arduino Sketch (Direct Link Mode)...
+echo [3/4] Compiling Arduino Sketch (Generated Lib Mode)...
 echo ========================================================
 cd /d "%PROJECT_ROOT%"
-"%ARDUINO_CLI%" compile --fqbn %FQBN% --libraries "%CUSTOM_LIB_PATH%" ^
-    --build-property "compiler.c.elf.extra_flags=\"-L%PROJECT_ROOT%src\" -lapple2_core" ^
-    --output-dir . "PicoApple2.ino"
+"%ARDUINO_CLI%" compile --fqbn %FQBN% --clean --libraries "%GEN_LIB_DIR%" ^
+    --output-dir "%OUT_DIR%" "PicoApple2.ino"
 if %errorlevel% neq 0 ( echo [ERROR] Arduino build failed. & pause & exit /b )
 
 echo.
@@ -62,7 +73,7 @@ if not "!T_COM!"=="" (
 )
 
 :: 執行上傳
-"%PICOTOOL%" load -x "PicoApple2.ino.elf"
+"%PICOTOOL%" load -x "%OUT_DIR%\PicoApple2.ino.elf"
 if %errorlevel% equ 0 (
     echo SUCCESS! Starting Terminal...
     start "Pico Terminal" cmd /c "%PROJECT_ROOT%terminal.bat"

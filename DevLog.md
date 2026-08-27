@@ -1,5 +1,48 @@
 # Pico Apple II Emulator - Development Log
 
+## 2026-08-27: 模擬畫面上移貼齊 y=0 + build 路徑鏈再度斷裂（實機驗證通過 ✅）
+
+### 1. 版面：模擬畫面從 y=24 移到 y=0（實機燒錄驗證通過 ✅）
+*   **改動**：`loop1()` 的掃描線送窗由 `startFrame(20, 24 + y, 299, 24 + y)` 改為 `startFrame(20, y, 299, y)`。x 維持 20（280px 仍左右置中），畫面範圍變成 **x 20..299 / y 0..191**，整塊貼齊面板頂端。
+*   **狀態列不動**：仍在 y=222（`updateStatusLine`），畫面底 191 與狀態列之間留下 192..221 的空白帶。
+*   **連帶調整（必要，不是順手改）**：
+    *   磁軌指示條跟著對齊 → `drawRect(305, 0, 8, 192, ...)`，滑塊 `handle_y = track * 184 / 34`，上限由 208 改為 **184**（184+8=192 剛好貼齊畫面底）。
+    *   **磁碟馬達 LED 從 y=10 搬到 y=196**。原位置 (305,10) 現在被上移後的磁軌條佔走，兩者會疊在一起；196..203 落在畫面底與狀態列之間的空白帶，兩邊都不碰。
+*   選單畫面用自己的全螢幕座標系（外框 10..309 / 10..229），不受此次改動影響。
+
+### 2. build 環境：sketchbook 從 Dropbox 搬到 Google Drive，路徑鏈再度斷裂（已修 ✅）
+*   **症狀**：`full_build.bat` 報 `Apple2Core.h: No such file or directory`。與 `make_arduino_lib.py` docstring 裡記錄的斷裂 #1 完全同一種。
+*   **根因**：使用者已棄用 Dropbox，內容搬到 `G:\我的雲端硬碟\dropbox_dahai_pon`，但 `~/.arduinoIDE/arduino-cli.yaml` 的 `user:` 仍指著 `c:\Users\Dell\Dropbox\Arduino`（整個路徑已不存在）。`scan_env.ps1` 照抄那個值 → `--libraries` 指向空氣。G: 上那份庫的 `.a` 也停在 2026-06-20，就算改指過去也會踩「靜默連結舊核心」的老坑。
+*   **修正 1 — `full_build.bat` 不再依賴 sketchbook**：步驟 2 改呼叫 `loader_offset/make_arduino_lib.py` 就地生成 Apple2Core 程式庫（`.h` 來自 repo 根目錄＝單一事實來源、`.a` 來自剛編好的產出），步驟 3 的 `--libraries` 只指這份、並加 `--clean`。原本的 direct-link（`-L src -lapple2_core` 走 `extra_flags`）拿掉——precompiled library 機制已經負責把 archive 放進 link 指令的正確位置。**這正是 `build_offset.bat` 早就在用的做法，兩支腳本現在一致了。**
+*   **修正 2 — 產出移進 `build/`**：`--output-dir` 由 `.` 改為 `%PROJECT_ROOT%build`（`.gitignore` 已含 `build/`），步驟 4 的 `picotool load -x` 路徑同步更新。repo 根目錄不再散落 `.uf2/.elf/.bin/.map`。
+*   **修正 3 — 生成庫放 `build\arduino_libs`，不要放 `build_offset\arduino_libs`**：後者是 offset 版的輸出目錄，兩支腳本共用會互相覆蓋。
+*   **修正 4 — `scan_env.ps1` 路徑不存在時出聲**：改成 `Test-Path` 後 `Write-Warning`，不再沉默地產出死路徑。**注意該檔必須維持純 ASCII** —— Windows PowerShell 5.1 以系統 codepage(cp950) 讀取無 BOM 的 `.ps1`，中文會被解成亂碼而觸發 parser error（我加中文註解時當場踩到）。同理 `.bat` 的註解也維持 ASCII，理由見 `build_offset.bat` 抬頭。
+*   **兩種產出別搞混**：`full_build.bat` link 在 `0x10000000`，產出 `build\PicoApple2.ino.uf2`，直接燒錄用；**rp2040-retro-loader 用的是 `build_offset.bat`**（link 在 `0x10004000`，前 16KB 留給 loader/trampoline），產出 `build_offset\PicoApple2_standalone.uf2`。
+*   **驗證**：完整跑過修改後的步驟 1–3（只截掉上傳）——Rust exit 0、Arduino `--clean` exit 0，Flash **177980 bytes (8%)**、RAM **103072 bytes (39%)**，`build\PicoApple2.ino.uf2` 393216 bytes。後續已燒錄實機並確認畫面正常 ✅。
+
+### 3. 兩個版本都重編（皆編譯通過 ✅；已燒錄實機測試成功 ✅）
+
+| 腳本 | link 位址 | 產出 | Flash |
+| :--- | :--- | :--- | :--- |
+| `full_build.bat` | `0x10000000` | `build\PicoApple2.ino.uf2` (393,216 B) | **177,980** B (8%) |
+| `build_offset.bat` | `0x10004000` | `build_offset\PicoApple2_standalone.uf2` (401,408 B) | **177,724** B (8%) |
+
+*   offset 版 7 步全過，其中步驟 6 的 flash 佈局檢查：`image 0x10004000..0x10031000 (184320 bytes)`、`向量表 SP=0x20042000 Reset=0x100040e3`，`app_present()` 條件都通過。步驟 7 合併跳板：`784 blocks (跳板 12 + body 720 + 填充 52)`。
+*   `build_offset\PicoApple2.ino.uf2`（368,640 B）是**只有 body、前 16KB 空的中間產物，不能單獨燒**。要用的是 `PicoApple2_standalone.uf2`：丟 SD 卡根目錄給 loader，或直接 `picotool load -v -x`。
+*   兩版 Flash 差 256 bytes 純粹是 linker script 不同（offset 版丟掉 `.boot2`/`.ota`/`.partition`），RAM 兩版相同 103,072 B (39%)。
+
+*   **實機結果：兩個版本都燒錄測試成功 ✅**。`build\PicoApple2.ino.uf2`（直燒版）與 `build_offset\PicoApple2_standalone.uf2`（rp2040-retro-loader 版）各自上機驗證，畫面都正常：模擬區貼齊面板頂端、狀態列留在 y=222，磁軌條與馬達 LED 未互相覆蓋。新的 build 流程（生成式 Apple2Core 程式庫 + 產出進 `build/`）兩條路線同時成立，offset 版的跳板合併與 flash 佈局也經實機確認。
+
+### 4. 收尾：把 `arduino-cli.yaml` 的 sketchbook 路徑指到 G:（順帶挖出 build_env.bat 的編碼坑）
+
+*   **改動**：`~/.arduinoIDE/arduino-cli.yaml` 的 `directories.user` 由 `c:\Users\Dell\Dropbox\Arduino` 改為 `G:\我的雲端硬碟\dropbox_dahai_pon\Arduino`（改前已備份為 `arduino-cli.yaml.bak-20260827`；Arduino IDE 當時未執行，否則它結束時會把設定寫回去覆蓋）。PicoApple2 本身已不需要這個路徑，但其他 sketch 需要。
+*   **改完立刻冒出第二個坑**：`scan_env.ps1` 是用 `Out-File -Encoding ascii` 產生 `build_env.bat` 的。新路徑含中文，ascii 把每個中文字轉成 `?`，於是 `ARDUINO_USER_LIB_PATH=G:\??????\dropbox_dahai_pon\...` —— **又是一條沉默的死路徑**，跟這篇第 2 節修的是同一種病。
+*   **為什麼不能用 8.3 短檔名繞開**：試過了，Google Drive 的虛擬檔案系統不產生短檔名（`ShortPath` 原樣回傳含中文的長路徑），所以那條路徑沒有任何純 ASCII 的寫法。
+*   **修正**：`Out-File -Encoding ascii` → **`-Encoding oem`**。`cmd.exe` 是用主控台 codepage 逐行解析 `.bat` 的，oem 正好對應系統預設（本機 cp950）。實測在 cp950 主控台下 `if exist "%ARDUINO_USER_LIB_PATH%\Apple2Core"` 回 YES。
+*   **已知限制（寫在 `scan_env.ps1` 註解裡）**：這假設呼叫端的主控台在系統預設 codepage。被強制 `chcp 65001` 的主控台（`build_offset.bat` 就會）會解錯這一行 —— 目前無害，因為兩支 build 腳本都不再讀這個變數；仍在讀它的是 `build_rust.bat` / `precompile_sd.bat` / `test_sd.bat` / `scripts/_compile_only.bat`。
+*   順手移除 `full_build.bat` 裡已成死碼的 `set "CUSTOM_LIB_PATH=%ARDUINO_USER_LIB_PATH%"`（步驟 3 改用 `GEN_LIB_DIR` 後就沒人用了）。
+*   **驗證**：在 cp950 主控台重跑修改後的步驟 1–3 —— `[OK] Libraries -> G:\我的雲端硬碟\...`（警告消失＝路徑真的解析得到）、Rust exit 0、Arduino `--clean` exit 0、Flash 177,980 B (8%)、`build\PicoApple2.ino.uf2` 393,216 B。
+
 ## 2026-07-01: 部分遊戲搖桿「右/下」失效——滿舵脈衝太短，補上飽和區（實機驗證通過 ✅）
 
 ### 症狀
