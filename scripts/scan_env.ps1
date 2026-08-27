@@ -46,8 +46,19 @@ if (-not (Test-Path $picotool)) {
 Write-Host " [OK] Picotool    -> $picotool"
 
 # 3. Resolve Library Path
+#    NOTE (2026-08-27): PicoApple2 no longer depends on this path. full_build.bat
+#    generates a self-contained Apple2Core library via loader_offset/make_arduino_lib.py.
+#    We still emit it for other sketches, but warn loudly when it does not exist:
+#    the sketchbook moved off Dropbox and arduino-cli.yaml user: was left stale,
+#    which surfaced only as "Apple2Core.h: No such file or directory".
 $libPath = Join-Path $arduinoUser "libraries"
-Write-Host " [OK] Libraries   -> $libPath"
+if (Test-Path $libPath) {
+    Write-Host " [OK] Libraries   -> $libPath"
+} else {
+    Write-Warning "Sketchbook libraries path does not exist: $libPath"
+    Write-Warning "  arduino-cli.yaml user: likely points at a moved/deleted folder."
+    Write-Warning "  PicoApple2 is unaffected (it uses a generated library); other sketches will fail."
+}
 
 # 4. Create build_env.bat
 $rootWithSlash = $projectRoot
@@ -62,7 +73,15 @@ $content = @(
     "set `"PROJECT_ROOT=$rootWithSlash`"",
     "set `"FQBN=rp2040:rp2040:rpipico`""
 )
-$content | Out-File -FilePath $outputBat -Encoding ascii -Force
+# Write as OEM (the console codepage cmd.exe uses to parse .bat files), not ascii.
+# The sketchbook now lives under a path with non-ASCII characters
+# (G:\<CJK>\dropbox_dahai_pon\Arduino); -Encoding ascii turned every one of them
+# into '?' and produced a silently broken ARDUINO_USER_LIB_PATH. Google Drive does
+# not expose 8.3 short names, so there is no ASCII-only spelling of that path.
+# Caveat: this assumes the caller's console is at the system default codepage.
+# A console forced to 65001 (as build_offset.bat does) will mis-decode the line,
+# which is harmless today because neither build script reads this variable.
+$content | Out-File -FilePath $outputBat -Encoding oem -Force
 
 Write-Host "--------------------------------------------------------"
 Write-Host "Scan Complete! Settings saved to build_env.bat"
