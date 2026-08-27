@@ -996,17 +996,17 @@ void loop1() {
       spin_unlock(res_lock, irq);
       
       if (g_last_m_on == -1 || motor_on != (g_last_m_on == 1) || (motor_on && last_loaded_track != g_last_drawn_track)) { 
-        if (g_last_m_on == -1 || motor_on != (g_last_m_on == 1)) { tft_dma.drawRect(305, 10, 8, 8, motor_on ? 0xF800 : 0x0000); }
+        if (g_last_m_on == -1 || motor_on != (g_last_m_on == 1)) { tft_dma.drawRect(305, 196, 8, 8, motor_on ? 0xF800 : 0x0000); }
         if (motor_on) {
           if (g_last_drawn_track != last_loaded_track) {
-            tft_dma.drawRect(305, 24, 8, 192, 0x18E3);
-            int handle_y = 24 + (last_loaded_track * 184 / 34);
-            if (handle_y > 208) handle_y = 208;
+            tft_dma.drawRect(305, 0, 8, 192, 0x18E3);
+            int handle_y = last_loaded_track * 184 / 34;
+            if (handle_y > 184) handle_y = 184;
             tft_dma.drawRect(305, handle_y, 8, 8, 0x07E0);
             g_last_drawn_track = last_loaded_track;
           }
         } else if (g_last_drawn_track != -1) {
-          tft_dma.drawRect(305, 24, 8, 192, 0x0000);
+          tft_dma.drawRect(305, 0, 8, 192, 0x0000);
           g_last_drawn_track = -1;
         }
         g_last_m_on = motor_on ? 1 : 0; 
@@ -1062,7 +1062,7 @@ void loop1() {
               }
               
               tft_dma.waitTransferDone(); // 等上一條 DMA 排空後才設窗 + 啟動本條
-              tft_dma.startFrame(20, 24 + y, 299, 24 + y);
+              tft_dma.startFrame(20, y, 299, y);
               tft_dma.sendScanlineAsync(line_ptr, 280);
               current_buf_idx = 1 - current_buf_idx;
           }
