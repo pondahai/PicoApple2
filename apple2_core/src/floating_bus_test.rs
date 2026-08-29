@@ -38,4 +38,36 @@ mod tests {
         // 且必須讀到真正的 RAM,不是寫死的哨兵值。
         assert!(any_nonzero, "floating bus 未讀到真正的 RAM");
     }
+
+    // $C010 在 II/II+ 上沒有資料驅動器(回傳 AKD 是 //e 的行為)。讀取只清 strobe,
+    // 值來自 floating bus。曾經回傳 keyboard_latch,讓以此為亂數/計時源的程式取到定值。
+    #[test]
+    fn kbdstrobe_read_clears_strobe_and_returns_floating_bus() {
+        let mut mem = Apple2Memory::new();
+
+        unsafe {
+            let ram = &mut *core::ptr::addr_of_mut!(crate::RAM_48K);
+            for (i, cell) in ram.iter_mut().enumerate() {
+                *cell = i as u8;
+            }
+        }
+
+        mem.begin_cpu_step(0);
+
+        // 放一個帶 strobe 的按鍵:'A' | 0x80。
+        mem.keyboard_latch = 0xC1;
+        assert_eq!(mem.read(0xC000), 0xC1, "$C000 必須回傳 latch 原值");
+
+        let v = mem.read(0xC010);
+        assert_eq!(mem.keyboard_latch, 0x41, "讀 $C010 必須清掉 strobe 位元");
+        assert_ne!(v, 0xC1, "$C010 回傳了 latch,而非 floating bus");
+
+        // 值必須隨掃描器 cycle 變動,證明真的走 floating bus。
+        let mut varied = false;
+        for _ in 0..199 {
+            if mem.read(0xC010) != v { varied = true; }
+        }
+        mem.end_cpu_step();
+        assert!(varied, "$C010 回傳常數 ({:#04x});未接上 floating bus", v);
+    }
 }

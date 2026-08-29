@@ -859,6 +859,9 @@ void scan_matrix() {
   if (raw_b1) { joy_btn1=true; hold_b1=now_t; } else if (now_t-hold_b1>40) joy_btn1=false;
 
   bool isShiftPressed = keyState[3][5], isCtrlPressed = keyState[2][6];
+  // 刻意不做 auto-repeat:以下為純邊緣觸發,按住不放只送一次鍵。
+  // Apple II/II+ 的鍵盤編碼器本身也不自動重複(要靠實體 REPT 鍵補 strobe),
+  // 自動重複是 //e 的 AY-5-3600-PRO 才有的行為。此處維持 II+ 語意 —— 不是缺陷,勿「修正」。
   for (int r = 0; r < 8; r++) {
     for (int c = 0; c < 8; c++) {
       bool p = keyState[r][c];

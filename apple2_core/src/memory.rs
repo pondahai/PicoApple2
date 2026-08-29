@@ -208,7 +208,13 @@ impl Memory for Apple2Memory {
                 if addr >= 0xC600 && addr <= 0xC6FF { return self.disk2.rom[(addr & 0xFF) as usize]; }
                 match addr {
                     0xC000..=0xC00F => self.keyboard_latch,
-                    0xC010..=0xC01F => { let v = self.keyboard_latch; self.keyboard_latch &= 0x7F; v }
+                    0xC010..=0xC01F => {
+                        // 讀取只清 strobe;回傳值是 floating bus,不是 latch。
+                        // II/II+ 的 $C010 沒有資料驅動器(AKD 是 //e 才有),CPU 讀到的
+                        // 是視訊掃描器當下留在匯流排上的位元組 —— 與 $C030/$C050 系列同理。
+                        self.keyboard_latch &= 0x7F;
+                        self.floating_bus()
+                    }
                     0xC080..=0xC08F => {
                         self.lc_bank2 = (addr & 0x08) == 0;
                         self.lc_read_enable = (addr & 0x03) == 0x00 || (addr & 0x03) == 0x03;
