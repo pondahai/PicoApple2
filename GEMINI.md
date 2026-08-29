@@ -51,14 +51,24 @@ The project is split into two main layers:
     ```
 
 ### Build Scripts
-*   **`full_build.bat`:** **Recommended.** Automates environment scan, Rust compilation, library syncing, Arduino compilation, and flashing via `picotool`.
+*   **`build_offset.bat`:** **Default / recommended.** Environment scan, Rust compilation, self-contained
+    Apple2Core library generation, offset linker script, sketch compile at `0x10004000`, flash-layout
+    check, trampoline merge. Does NOT upload. Produces `build_offset\PicoApple2_standalone.uf2` -- the
+    file to use, valid both as an SD-card payload for rp2040-retro-loader and as a direct USB flash.
+    Do NOT flash `build_offset\PicoApple2.ino.uf2`: that is the body only (first 16KB blank) and it
+    shares its filename with the normal build.
+*   **`full_build.bat`:** Legacy path for boards without the loader/trampoline. Links at `0x10000000`
+    and auto-uploads via 1200bps reset. Produces `build\PicoApple2.ino.uf2`.
 *   **`build_rust.bat`:** Compiles only the Rust core and syncs the library/headers to the Arduino `libraries/` directory for IDE use.
 *   **`check_env.bat`:** Validates the development environment and paths.
 
 ### Deployment
-1.  Connect the Pico in Bootloader mode.
-2.  Run `full_build.bat`.
-3.  The script will automatically detect the device and flash the firmware.
+1.  Run `build_offset.bat` (no device needed -- it does not upload).
+2.  Connect the Pico in BOOTSEL mode.
+3.  Drop `build_offset\PicoApple2_standalone.uf2` onto the `RPI-RP2` drive, or run `picotool load -v -x`
+    on it. Alternatively copy it to the SD card root and let the loader install it.
+
+Legacy one-shot path (no loader): run `full_build.bat`, which compiles and flashes in one go.
 
 ## 🎹 Interaction & Controls
 

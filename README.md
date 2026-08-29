@@ -104,8 +104,22 @@
 ### 快速編譯與上傳 (自動化腳本)
 確認環境正確後，您可以使用以下腳本進行開發：
 
-*   **一鍵全編譯** (`full_build.bat`):
-    自動執行環境掃描 -> 編譯 Rust 核心 -> 同步靜態庫 -> 編譯 `PicoApple2.ino` -> 自動透過 1200bps 重置並上傳至 Pico。
+*   **預設編譯流程** (`build_offset.bat`) ⭐:
+    環境掃描 -> 編譯 Rust 核心 -> 生成 Apple2Core 程式庫 -> 產生偏移 linker script -> 以 `0x10004000`
+    編譯 -> 檢查 flash 佈局 -> 合併 trampoline。**本腳本不上傳**。
+    ```bash
+    .\build_offset.bat
+    ```
+    產出 **`build_offset\PicoApple2_standalone.uf2`** —— 這是要用的檔案。放進 SD 卡根目錄給
+    [rp2040-retro-loader](https://github.com/pondahai/rp2040-retro-loader)，或直接拖進 `RPI-RP2`、
+    或 `picotool load -v -x` 用 USB 燒。兩種路徑吃同一個檔。
+
+    > ⚠️ 同目錄下的 `build_offset\PicoApple2.ino.uf2` **不能單獨燒**——那是前 16KB 空白的純
+    > body，而且跟正常版**檔名一樣**。只認 `_standalone` 這個字尾。
+
+*   **不搭配載入器時** (`full_build.bat`):
+    link 在 `0x10000000` 的傳統流程，最後會自動 1200bps 重置並上傳，產出 `build\PicoApple2.ino.uf2`。
+    standalone 版經 USB 燒錄同樣可行，所以這支腳本現在只在「不想裝 trampoline」時才需要。
     ```bash
     .\full_build.bat
     ```
@@ -122,7 +136,7 @@
 .\build_offset.bat
 ```
 
-產出 `build_offset\PicoApple2_standalone.uf2`。這個檔案兩種用法都吃得下：放進 SD 卡根目錄給載入器，或直接用 USB 燒進去。**平常開發不受影響**——`full_build.bat` 完全沒動，偏移模式是另一支獨立的腳本。
+產出 `build_offset\PicoApple2_standalone.uf2`。這個檔案兩種用法都吃得下：放進 SD 卡根目錄給載入器，或直接用 USB 燒進去。**這已是本專案的預設編譯流程**（見上面「快速編譯與上傳」）；`full_build.bat` 保留為不搭配載入器時的備援，兩支腳本共用同一份 `.a`。
 
 這支腳本**不需要你在 Arduino sketchbook 裡安裝 `Apple2Core` 程式庫**，它會自己生成一份（見下面「不依賴 sketchbook」）。
 

@@ -5,7 +5,9 @@
 ## 🛠️ 1. 編譯與佈署 (Build & Deploy)
 - [ ] **Rust 核心編譯**：執行 `build_rust.bat` 成功，無 Error，警告 (Warning) 在預期範圍內。
 - [ ] **靜態庫同步**：`libapple2_core.a` 與 `Apple2Core.h` 成功複製到 Arduino Library 目錄或專案 `src/` 目錄。
-- [ ] **Arduino 編譯與燒錄**：執行 `full_build.bat` 成功，`picotool` 順利找到裝置並完成燒錄，裝置自動重啟。
+- [ ] **Arduino 編譯（預設流程）**：執行 `build_offset.bat` 成功，7/7 全過，第 6 步 flash 佈局檢查回報 image 起點 `0x10004000`，且向量表通過 `app_present()` 的條件。
+- [ ] **燒錄**：把 `build_offset\PicoApple2_standalone.uf2` 拖進 `RPI-RP2`（或放進 SD 卡根目錄走載入器），裝置正常開機。
+  - ⚠️ **不要**燒同目錄的 `PicoApple2.ino.uf2`——那是前 16KB 空白的純 body，且與正常版同名。
 
 ## 📺 2. 視訊與渲染 (Video & Rendering)
 - [ ] **開機畫面 (Text Mode)**：畫面正中央出現 `Apple //][` 標誌，下方出現閃爍的游標。字體清晰無破圖。
