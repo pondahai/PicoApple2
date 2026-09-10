@@ -1,4 +1,4 @@
-# 🗺️ Pico Apple II Emulator Project Map (Updated 2026-04-03)
+# 🗺️ Pico Apple II Emulator Project Map (Updated 2026-09-10)
 
 ## 1. 核心結構 (Project Architecture)
 目前的架構採用 **「交錯式光柵同步渲染 (Interlaced VBLANK Sync)」**、**「無鎖原子狀態 (Lock-free Atomics)」** 與 **「即時狀態通訊協定」**：
@@ -8,6 +8,7 @@
 | `apple2_core/` | 模擬器邏輯核心 (CPU, Mem, Disk) | **Rust** | 支援 bit-level 磁碟移位暫存器模擬。 |
 | `PicoApple2.ino` | RP2040 雙核排程、JIT 渲染器 | **C++** | 整合 Hardware SPI + DMA 傳輸。 |
 | `TFT_DMA.cpp/h` | 底層顯示驅動 | **C++** | 自定義非阻塞傳輸與 UI 繪製邏輯。 |
+| `disk_archive.cpp/h` | `.gz`/`.zip` 磁碟解壓與回壓 | **C++** | uzlib streaming;回壓支援分片執行 (begin/step/abort)。 |
 | `Apple2Keyboard.html` | 專業虛擬控制台 (Pro Console) | **JS/HTML** | 透過 STX 協定實現 Press/Release 同步。 |
 
 ## 2. 硬體架構與時序 (Hardware & Timing)
@@ -16,9 +17,22 @@
     - **精確導航:** 選單模式下自動切換方向鍵為選單導航 (`g_menu_cmd`)。
 - **動態時脈:** 1.023 MHz (Fixed) / 1.48 MHz (Turbo)。
 - **顯示效能:** SPI 頻率鎖定 62.5MHz，DMA 負責傳輸，Core 1 負載大幅下降。
+- **匯流排分工:** TFT 走 `spi0` (62.5MHz)、SD 走 `SPI1` (20MHz)，兩者硬體上互不阻擋。
+
+### 雙核分工與 SD 互斥 (2026-09-10)
+| Core | 職責 |
+| :--- | :--- |
+| **Core 0** | 6502 `apple2_tick()`、時序節流、`audioPump()`、序列埠/WebSerial 輸入、SD 熱插拔輪詢、**同步 SD 存取（讀軌 / flush / 目錄列舉）** |
+| **Core 1** | 掃描線渲染 (beam-chasing)、VBLANK 鍵盤矩陣掃描、選單、音訊 alarm pool (ISR)、**背景回壓分片** |
+
+- **回壓信箱 (mailbox):** Core 0 投信 → Core 1 分片執行整檔回壓，模擬器不停。狀態機 `RP_IDLE / RP_PENDING / RP_RUNNING`。
+- **互斥不變式:** `IDLE→PENDING` 只有 Core 0 做、`PENDING→RUNNING` 只有 Core 1 做。Core 0 進 SD 臨界區前呼叫 `sdClaimForCore0()`（未開工就撤回、已開工則請對方在分片邊界收手），最多等一步 ~12ms。
+- ⚠️ **音訊 alarm pool 必須建在 Core 1**（ISR 跟著建立它的核心跑），避開 Core 0 模擬批次的長關中斷窗口。
+- ⚠️ **`setup1()` 也會做 `SD.begin()` / `openLastDisk()`** —— SD 存取橫跨兩核，動任何 SD 路徑前先確認互斥。
 
 ## 3. 資源狀態 (Pico RP2040)
-- **RAM 佔用:** 約 **50% (131KB)**。
+- **RAM 佔用:** **39% (103,364 / 262,144 bytes)**（2026-09-10 offset build 實測）。
+- **Flash 佔用:** offset build image 186,624 bytes @ `0x10004000`。
 - **編譯環境:** 支援 Arduino CLI 與全自動環境掃描。
 
 ## 4. 待辦事項 (Backlog)
@@ -26,6 +40,9 @@
 - [x] 實作 TFT DMA 掃描線雙緩衝。
 - [x] 修復 Rust 核心位元級重構後的啟動當機。
 - [x] 實施「磁軌重整」與「Safe Write-back」。
+- [x] 壓縮磁碟回壓背景化（Core 1 mailbox + 分片 + 中止機制）。詳見 DevLog 2026-09-10。
+- [x] 板載 LED (GPIO25) 作為 SD 寫入指示燈。
+- [ ] **第三階段：換軌 flush 也搬進信箱**。高頻停頓（每次換軌 ~10–30ms），但只有「寫」能背景化——讀軌時客端在等資料，本質同步。
 
 ## 5. 已知問題與待修復 (Known Issues & FIXME)
 - [x] **FIXME (Disk Write) - RESOLVED:** DOS 3.3 對磁碟執行 `SAVE` 與寫入錯誤。
