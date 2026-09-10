@@ -12,7 +12,11 @@ extern "C" {
 
 #define DICT_SIZE   32768u   // inflate window; external gz/zip may use up to 32K
 #define OUT_CHUNK    2048u   // streaming output flush buffer
-#define GZ_CHUNK    16384u   // multi-member gzip slice (also compressor window)
+// multi-member gzip slice (also compressor window). 16K -> 4K：分片回壓時每步壓
+// 一個 member，member 越大單步停格越久(16K 約 47ms = 3 個影格)。4K 讓單步降到
+// 一個影格以內，代價是 member 變多(140KB -> 35 個，多約 630 bytes 標頭)且字典
+// 窗口變小、壓縮率略降。multi-member gzip 自描述，舊的 16K 檔案照樣解得開。
+#define GZ_CHUNK     4096u
 #define ZIP_INNER  "DISK.DSK"
 #define REPACK_TMP "/_REPACK.TMP"
 
@@ -321,4 +325,191 @@ bool archive_compress(const char* src_dsk_path, const char* dst_path, int kind) 
     if (SD.exists(dst_path)) SD.remove(dst_path);
     if (!SD.rename(REPACK_TMP, dst_path)) { SD.remove(REPACK_TMP); return false; }
     return true;
+}
+
+// ---- 分片回壓 ---------------------------------------------------------------
+// 與 compress_gz / compress_zip_stored 同樣的輸出格式，只是把迴圈外提成狀態機，
+// 每呼叫一次 step 只做一小塊。緩衝與 File handle 跨呼叫存活，所以同一時間只能
+// 有一份工作在跑（單一靜態狀態，與整檔版共用 REPACK_TMP）。
+enum CompPhase {
+    CP_IDLE = 0,
+    CP_GZ_MEMBER,     // 每步壓一個 gz member
+    CP_ZIP_CRC,       // 每步 CRC 一塊
+    CP_ZIP_HEAD,      // 寫 local header
+    CP_ZIP_COPY,      // 每步搬一塊
+    CP_ZIP_TAIL,      // 寫 central directory + EOCD
+    CP_FINISH         // 收尾：flush/close/rename
+};
+
+#define SLICE_BYTES 4096u        // zip 每步搬移量；gz 每步固定一個 GZ_CHUNK member
+
+static struct {
+    CompPhase phase;
+    int       kind;
+    char      dst[64];
+    File      in, out;
+    // gz
+    struct uzlib_comp c;
+    unsigned  hash_size;
+    uint8_t*  src;
+    // zip
+    uint32_t  usize, crc, left;
+} cs;
+
+static void comp_release(void) {
+    if (cs.c.hash_table) { free(cs.c.hash_table); cs.c.hash_table = NULL; }
+    if (cs.src)          { free(cs.src);          cs.src = NULL; }
+    if (cs.c.outbuf)     { free(cs.c.outbuf);     cs.c.outbuf = NULL; }
+    if (cs.out) cs.out.close();
+    if (cs.in)  cs.in.close();
+    cs.phase = CP_IDLE;
+}
+
+void archive_compress_abort(void) {
+    if (cs.phase == CP_IDLE) return;
+    comp_release();
+    if (SD.exists(REPACK_TMP)) SD.remove(REPACK_TMP);
+}
+
+bool archive_compress_begin(const char* src_dsk_path, const char* dst_path, int kind) {
+    if (cs.phase != CP_IDLE) return false;          // 已有工作在跑
+    if (kind != ARC_GZ && kind != ARC_ZIP) return false;
+    memset(&cs, 0, sizeof(cs));
+    strncpy(cs.dst, dst_path, sizeof(cs.dst) - 1);
+    cs.kind = kind;
+
+    if (SD.exists(REPACK_TMP)) SD.remove(REPACK_TMP);
+    cs.in = SD.open(src_dsk_path, FILE_READ);
+    if (!cs.in) return false;
+    cs.out = SD.open(REPACK_TMP, FILE_WRITE);
+    if (!cs.out) { cs.in.close(); return false; }
+
+    if (kind == ARC_GZ) {
+        cs.c.dict_size = GZ_CHUNK;
+        cs.c.hash_bits = 12;
+        cs.hash_size = sizeof(uzlib_hash_entry_t) * (1u << cs.c.hash_bits);
+        cs.c.hash_table = (uzlib_hash_entry_t*)malloc(cs.hash_size);
+        cs.src = (uint8_t*)malloc(GZ_CHUNK);
+        cs.c.outsize = GZ_CHUNK + GZ_CHUNK / 2 + 128;
+        cs.c.outbuf = (unsigned char*)malloc(cs.c.outsize);
+        if (!cs.c.hash_table || !cs.src || !cs.c.outbuf) { comp_release(); SD.remove(REPACK_TMP); return false; }
+        cs.phase = CP_GZ_MEMBER;
+    } else {
+        cs.usize = cs.in.size();
+        cs.crc = ~0u;
+        cs.left = cs.usize;
+        cs.in.seek(0);
+        cs.phase = CP_ZIP_CRC;
+    }
+    return true;
+}
+
+// 失敗共同出口：清掉暫存檔，原始壓縮檔保持完好。
+static int comp_fail(void) {
+    comp_release();
+    SD.remove(REPACK_TMP);
+    return -1;
+}
+
+int archive_compress_step(void) {
+    switch (cs.phase) {
+    case CP_IDLE:
+        return -1;
+
+    case CP_GZ_MEMBER: {
+        int n = cs.in.read(cs.src, GZ_CHUNK);
+        if (n < 0) return comp_fail();
+        if (n == 0) { cs.phase = CP_FINISH; return 1; }
+
+        static const uint8_t hdr[10] = { 0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0, 0xff };
+        memset(cs.c.hash_table, 0, cs.hash_size);
+        cs.c.outlen = 0; cs.c.outbits = 0; cs.c.noutbits = 0; cs.c.comp_disabled = 0;
+        zlib_start_block(&cs.c);
+        uzlib_compress(&cs.c, cs.src, (unsigned)n);
+        zlib_finish_block(&cs.c);
+
+        uint8_t tr[8];
+        wr32(tr, ~uzlib_crc32(cs.src, n, ~0u));
+        wr32(tr + 4, (uint32_t)n);
+        if (cs.out.write(hdr, 10) != 10 ||
+            cs.out.write(cs.c.outbuf, cs.c.outlen) != (size_t)cs.c.outlen ||
+            cs.out.write(tr, 8) != 8) return comp_fail();
+        return 1;
+    }
+
+    case CP_ZIP_CRC: {
+        uint8_t b[SLICE_BYTES];
+        uint32_t n = cs.left < SLICE_BYTES ? cs.left : SLICE_BYTES;
+        int r = cs.in.read(b, n);
+        if (r <= 0) return comp_fail();
+        cs.crc = uzlib_crc32(b, r, cs.crc);
+        cs.left -= (uint32_t)r;
+        if (cs.left == 0) { cs.crc = ~cs.crc; cs.phase = CP_ZIP_HEAD; }
+        return 1;
+    }
+
+    case CP_ZIP_HEAD: {
+        const char* inner = ZIP_INNER;
+        uint16_t nlen = (uint16_t)strlen(inner);
+        uint8_t lh[30]; memset(lh, 0, 30);
+        lh[0] = 0x50; lh[1] = 0x4b; lh[2] = 0x03; lh[3] = 0x04;
+        wr16(lh + 4, 20);
+        wr32(lh + 14, cs.crc);
+        wr32(lh + 18, cs.usize);
+        wr32(lh + 22, cs.usize);
+        wr16(lh + 26, nlen);
+        if (cs.out.write(lh, 30) != 30) return comp_fail();
+        if (cs.out.write((const uint8_t*)inner, nlen) != nlen) return comp_fail();
+        cs.in.seek(0);
+        cs.left = cs.usize;
+        cs.phase = CP_ZIP_COPY;
+        return 1;
+    }
+
+    case CP_ZIP_COPY: {
+        uint8_t b[SLICE_BYTES];
+        uint32_t n = cs.left < SLICE_BYTES ? cs.left : SLICE_BYTES;
+        int r = cs.in.read(b, n);
+        if (r <= 0) return comp_fail();
+        if (cs.out.write(b, r) != (size_t)r) return comp_fail();
+        cs.left -= (uint32_t)r;
+        if (cs.left == 0) cs.phase = CP_ZIP_TAIL;
+        return 1;
+    }
+
+    case CP_ZIP_TAIL: {
+        const char* inner = ZIP_INNER;
+        uint16_t nlen = (uint16_t)strlen(inner);
+        uint32_t cd_off = 30u + nlen + cs.usize;
+        uint8_t cd[46]; memset(cd, 0, 46);
+        cd[0] = 0x50; cd[1] = 0x4b; cd[2] = 0x01; cd[3] = 0x02;
+        wr16(cd + 4, 20); wr16(cd + 6, 20);
+        wr32(cd + 16, cs.crc);
+        wr32(cd + 20, cs.usize);
+        wr32(cd + 24, cs.usize);
+        wr16(cd + 28, nlen);
+        if (cs.out.write(cd, 46) != 46) return comp_fail();
+        if (cs.out.write((const uint8_t*)inner, nlen) != nlen) return comp_fail();
+
+        uint8_t eo[22]; memset(eo, 0, 22);
+        eo[0] = 0x50; eo[1] = 0x4b; eo[2] = 0x05; eo[3] = 0x06;
+        wr16(eo + 8, 1); wr16(eo + 10, 1);
+        wr32(eo + 12, 46u + nlen);
+        wr32(eo + 16, cd_off);
+        if (cs.out.write(eo, 22) != 22) return comp_fail();
+        cs.phase = CP_FINISH;
+        return 1;
+    }
+
+    case CP_FINISH: {
+        cs.out.flush();
+        char dst[64];
+        strncpy(dst, cs.dst, sizeof(dst));
+        comp_release();                       // 關檔並釋放緩衝後才能 rename
+        if (SD.exists(dst)) SD.remove(dst);
+        if (!SD.rename(REPACK_TMP, dst)) { SD.remove(REPACK_TMP); return -1; }
+        return 0;
+    }
+    }
+    return -1;
 }
