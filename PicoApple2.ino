@@ -34,6 +34,9 @@
 #define BTN_B     3
 #define BTN_MENU  4
 #define BTN_ALT   28
+// 板載 LED（rpipico = GPIO25 直驅；若換成 Pico W 要改寫，那顆 LED 掛在 CYW43
+// 上，每次切換都要走 SPI 到無線晶片，成本完全不同）。
+#define PIN_SD_LED 25
 
 TFT_DMA tft_dma(PIN_DISPLAY_CS, PIN_DISPLAY_DC, PIN_DISPLAY_RST, PIN_DISPLAY_MOSI, PIN_DISPLAY_SCK);
 
@@ -242,6 +245,24 @@ volatile bool g_archive_dirty = false; // a track was written to the work dsk si
 unsigned long g_motor_off_time = 0;          // 馬達最後停轉時刻(millis)；0 = 無待回壓
 #define ARCHIVE_REPACK_DELAY_MS 2500         // 馬達持續停轉這麼久且 dirty → 自動回壓(防抖)
 
+// --- SD 寫入指示燈 -----------------------------------------------------------
+// 指示的是「寫入」而非所有 SD 存取：讀軌本來就有畫面右側的磁軌條可看，寫回才是
+// 無從確認的那一半。單次換軌 flush 只有 ~10ms，直接跟著存取亮滅會短到看不見，
+// 所以用 latch：點亮後至少維持 LED_HOLD_MS。回壓是每 ~12ms 一個分片，連續脈衝
+// 會讓燈在整段回壓期間保持恆亮，正好跟短促的 flush 閃爍區分開。
+#define LED_HOLD_MS 60
+volatile unsigned long g_sd_led_until = 0;   // 亮到這個時刻(millis)；0 = 熄滅
+
+static inline void sdLedPulse() {
+  gpio_put(PIN_SD_LED, 1);
+  unsigned long until = millis() + LED_HOLD_MS;
+  if (until > g_sd_led_until) g_sd_led_until = until;   // 只延長，不縮短
+}
+// 由 Core 0 的 loop() 每輪呼叫（放在所有 early return 之前）。
+static inline void sdLedService() {
+  if (g_sd_led_until && millis() >= g_sd_led_until) { g_sd_led_until = 0; gpio_put(PIN_SD_LED, 0); }
+}
+
 // --- 回壓信箱 (Core 0 投信 → Core 1 執行) -------------------------------------
 // 整檔回壓 (gzip 重壓 140KB) 要數百 ms～秒級。原本它跑在 Core 0 的 loop() 裡，
 // 期間 6502 完全停住（畫面停、音樂斷、遊戲卡）。改成信箱後 Core 0 只投信就繼續
@@ -369,6 +390,7 @@ void flushDirtyTrack() {
     if (diskFile.seek(offset) && diskFile.write(track_buffer, 4096) == 4096) {
       diskFile.flush();
       if (g_archive_src.length()) g_archive_dirty = true; // work dsk diverged from archive
+      sdLedPulse();
       Serial.printf("[SD] Flush Track %d: 4096 bytes written\n", target_track);
     } else {
       markSdRemoved(); // 寫入失敗：dirty 資料遺失（硬拔代價），但避免後續對死卡操作
@@ -479,6 +501,7 @@ void serviceRepack() {
   // 回壓跑完 —— 這正是分片換來的好處，否則拉長的 RUNNING 反而害它等更久。
   if (g_repack_abort) { archive_compress_abort(); repackEnd(false, "ABORTED"); return; }
 
+  sdLedPulse();                                   // 回壓每步都補一次 → 整段維持恆亮
   int r = archive_compress_step();
   g_repack_steps++;
   if (r > 0) return;                              // 還有工作，下輪再來
@@ -628,6 +651,7 @@ void setup() {
   int lock_num = spin_lock_claim_unused(true);
   res_lock = spin_lock_init(lock_num);
   pinMode(PIN_JACK_SND, OUTPUT);
+  gpio_init(PIN_SD_LED); gpio_set_dir(PIN_SD_LED, GPIO_OUT); gpio_put(PIN_SD_LED, 0);
   uint32_t irq = spin_lock_blocking(res_lock);
   apple2_init();
   spin_unlock(res_lock, irq);
@@ -636,6 +660,7 @@ void setup() {
 
 void loop() {
   watchdog_update();
+  sdLedService();      // 放在所有 early return 之前，否則進選單/暫停時燈會卡在亮著
   g_c0_checkpoint = 1; 
   
   static int esc_state = 0; static char esc_buf[8]; static int esc_idx = 0;
@@ -792,23 +817,6 @@ void loop() {
   g_c0_checkpoint = 7;
   audioPump();
 
-  // --- Core 0 實速監看（診斷用）------------------------------------------------
-  // 判定「背景回壓期間畫面暴衝」是視覺追幀還是模擬器真的加速。
-  // 節流只補慢不壓快(expected > actual 才 delay)，所以若平常 throttled% 偏低，
-  // 代表 Core 0 本來就跑不滿速；回壓期間 Core 1 停止競爭 res_lock/匯流排時，
-  // kcyc/s 就會真的往上跳 —— 那是真暴衝，不是畫面錯覺。
-  // 目標值：1.0x 下應穩定在 ~1023 kcyc/s 且 throttled% 接近 100。
-  static uint32_t spd_cycles = 0, spd_batches = 0, spd_throttled = 0;
-  static unsigned long spd_t0 = 0;
-  spd_cycles += cycles; spd_batches++;
-  if (expected > actual) spd_throttled++;
-  if (millis() - spd_t0 >= 1000) {
-    Serial.printf("[SPD] %lu kcyc/s batches=%lu throttled=%lu%% rp=%d\n",
-                  (unsigned long)(spd_cycles / 1000), (unsigned long)spd_batches,
-                  (unsigned long)(spd_batches ? spd_throttled * 100 / spd_batches : 0),
-                  (int)g_repack_state);
-    spd_cycles = 0; spd_batches = 0; spd_throttled = 0; spd_t0 = millis();
-  }
 }
 
 void drawString(uint16_t x, uint16_t y, String s, uint16_t color, uint16_t bg) {
