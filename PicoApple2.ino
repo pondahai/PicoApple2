@@ -254,11 +254,16 @@ unsigned long g_motor_off_time = 0;          // 馬達最後停轉時刻(millis)
 //   IDLE    : Core 0 自由使用 SD
 //   PENDING : 已投信、Core 1 尚未取件。Core 0 若此時要用 SD 可「撤回」（dirty
 //             保留，下次馬達停轉再排一次），不必等
-//   RUNNING : Core 1 已開工，work dsk 必須維持一致快照 → Core 0 只能等
+//   RUNNING : Core 1 已開工。壓縮是分片進行的（每次 loop1 一步），Core 0 可以設
+//             g_repack_abort 要求收手，最多等一步 (~12ms)。暫存檔尚未 rename，
+//             原始壓縮檔完好，所以任一步中止都安全
 enum RepackState { RP_IDLE = 0, RP_PENDING, RP_RUNNING };
 volatile uint8_t g_repack_state = RP_IDLE;
+volatile bool    g_repack_abort = false;  // Core 0 要求在下一個分片邊界收手
 char  g_repack_src[64] = {0};     // 投信當下快照的目標壓縮檔路徑（不跨核共用 String）
 int   g_repack_kind = ARC_RAW;
+unsigned long g_repack_t0 = 0;    // 本次回壓起始時刻（記帳用）
+uint32_t      g_repack_steps = 0; // 本次回壓已執行的分片數
 
 // Core 1 取件：PENDING → RUNNING。用 res_lock 保護狀態轉換，避免與 Core 0 的
 // 撤回競態造成「Core 0 以為撤回成功、Core 1 同時開工」的雙頭馬車。
@@ -278,6 +283,8 @@ void sdClaimForCore0() {
   if (g_repack_state == RP_PENDING) {
     g_repack_state = RP_IDLE;       // 撤回：g_archive_dirty 於下方 postRepackIfDirty 還原
     g_archive_dirty = true;
+  } else if (g_repack_state == RP_RUNNING) {
+    g_repack_abort = true;          // 已開工 → 請 Core 1 在下一個分片邊界收手(~12ms)
   }
   spin_unlock(res_lock, irq);
   while (g_repack_state != RP_IDLE) tight_loop_contents();
@@ -438,19 +445,44 @@ void postRepackIfDirty() {
   g_repack_state = RP_PENDING;
 }
 
-// Core 1：取件並執行整檔回壓。期間 Core 0 被 sdClaimForCore0() 擋在 SD 之外。
-void serviceRepack() {
-  if (g_repack_state != RP_PENDING) return;
-  if (!repackTryClaim()) return;                  // 被 Core 0 撤回
-  tft_dma.waitTransferDone();                     // 讓 SPI0 靜下來再動 SPI1 上的 SD
-  uint32_t t0 = millis();
-  if (diskFile) diskFile.close();
-  bool ok = archive_compress(WORK_DSK, g_repack_src, g_repack_kind);
+// 回壓結束（完成／失敗／中止）的共同收尾：重開 work dsk、記帳、放掉 SD 使用權。
+// 清 abort 與轉 IDLE 必須在同一個 res_lock 內完成，否則會有這個競態：Core 1 剛清
+// 掉 abort、還沒轉 IDLE 時 Core 0 進來設 abort → 旗標殘留 → 下一份工作一開工就被
+// 誤中止。
+static void repackEnd(bool ok, const char* what) {
   diskFile = SD.open(WORK_DSK, "r+"); if (!diskFile) diskFile = SD.open(WORK_DSK, "r");
-  if (!ok) g_archive_dirty = true;                // 失敗 → 留著 dirty，下次停轉重試
-  Serial.printf("[ARC] BG repack %s: %s (%lu ms)\n", g_repack_src, ok ? "OK" : "FAIL", millis() - t0);
-  __dmb();
+  if (!ok) g_archive_dirty = true;                // 失敗或中止 → 留著 dirty，下次停轉重試
+  Serial.printf("[ARC] BG repack %s: %s (%lu ms, %lu steps)\n",
+                g_repack_src, what, millis() - g_repack_t0, (unsigned long)g_repack_steps);
+  uint32_t irq = spin_lock_blocking(res_lock);
+  g_repack_abort = false;
   g_repack_state = RP_IDLE;
+  spin_unlock(res_lock, irq);
+}
+
+// Core 1：分片執行回壓。每次 loop1() 只做一步（一個 4KB gz member，約 12ms）就
+// 返回，讓渲染有機會插進來跑 —— 整檔一次壓完會讓畫面停格約 25 個影格。
+// 期間 Core 0 被 sdClaimForCore0() 擋在 SD 之外，但它可以要求中止（見下）。
+void serviceRepack() {
+  if (g_repack_state == RP_PENDING) {
+    if (!repackTryClaim()) return;                // 被 Core 0 撤回
+    tft_dma.waitTransferDone();                   // 讓 SPI0 靜下來再動 SPI1 上的 SD
+    g_repack_t0 = millis(); g_repack_steps = 0;
+    if (diskFile) diskFile.close();
+    if (!archive_compress_begin(WORK_DSK, g_repack_src, g_repack_kind)) repackEnd(false, "BEGIN FAIL");
+    return;                                       // 開檔也要錢，這輪先還給渲染
+  }
+  if (g_repack_state != RP_RUNNING) return;
+
+  // Core 0 要用 SD：在分片邊界收手。暫存檔尚未 rename，原始壓縮檔完好無損，
+  // 所以任何一步中止都是安全的。Core 0 因此最多只等一步(~12ms)，而不是等整份
+  // 回壓跑完 —— 這正是分片換來的好處，否則拉長的 RUNNING 反而害它等更久。
+  if (g_repack_abort) { archive_compress_abort(); repackEnd(false, "ABORTED"); return; }
+
+  int r = archive_compress_step();
+  g_repack_steps++;
+  if (r > 0) return;                              // 還有工作，下輪再來
+  repackEnd(r == 0, r == 0 ? "OK" : "FAIL");
 }
 
 // 持久化到 LASTDISK 的路徑：壓縮檔記原檔，純 dsk 記自身（不可記 work dsk）。
@@ -759,6 +791,24 @@ void loop() {
 
   g_c0_checkpoint = 7;
   audioPump();
+
+  // --- Core 0 實速監看（診斷用）------------------------------------------------
+  // 判定「背景回壓期間畫面暴衝」是視覺追幀還是模擬器真的加速。
+  // 節流只補慢不壓快(expected > actual 才 delay)，所以若平常 throttled% 偏低，
+  // 代表 Core 0 本來就跑不滿速；回壓期間 Core 1 停止競爭 res_lock/匯流排時，
+  // kcyc/s 就會真的往上跳 —— 那是真暴衝，不是畫面錯覺。
+  // 目標值：1.0x 下應穩定在 ~1023 kcyc/s 且 throttled% 接近 100。
+  static uint32_t spd_cycles = 0, spd_batches = 0, spd_throttled = 0;
+  static unsigned long spd_t0 = 0;
+  spd_cycles += cycles; spd_batches++;
+  if (expected > actual) spd_throttled++;
+  if (millis() - spd_t0 >= 1000) {
+    Serial.printf("[SPD] %lu kcyc/s batches=%lu throttled=%lu%% rp=%d\n",
+                  (unsigned long)(spd_cycles / 1000), (unsigned long)spd_batches,
+                  (unsigned long)(spd_batches ? spd_throttled * 100 / spd_batches : 0),
+                  (int)g_repack_state);
+    spd_cycles = 0; spd_batches = 0; spd_throttled = 0; spd_t0 = millis();
+  }
 }
 
 void drawString(uint16_t x, uint16_t y, String s, uint16_t color, uint16_t bg) {

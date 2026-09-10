@@ -29,3 +29,15 @@ bool archive_extract(const char* src_path, const char* dst_path, int kind);
 // first and renames over dst, so a failure/power-loss leaves the old archive
 // intact. Returns true on success.
 bool archive_compress(const char* src_dsk_path, const char* dst_path, int kind);
+
+// --- 分片回壓 ---------------------------------------------------------------
+// archive_compress() 會一路壓完才返回（140KB 約 400ms）。跑在 Core 1 上時，那段
+// 期間畫面渲染完全停擺 -> 停格約 25 個影格。以下 API 把同一份工作拆成許多小步，
+// 呼叫端可以在兩步之間回去跑渲染。
+//
+// 用法：begin() 成功後反覆呼叫 step()，直到它回傳 0（完成，已 rename 覆蓋 dst）
+// 或 -1（失敗，暫存檔已清掉、dst 原檔完好）。中途要放棄就呼叫 abort()。
+// 同一時間只能有一份分片工作在進行（內部是單一靜態狀態）。
+bool archive_compress_begin(const char* src_dsk_path, const char* dst_path, int kind);
+int  archive_compress_step(void);   // 1 = 還有工作, 0 = 完成, -1 = 失敗
+void archive_compress_abort(void);  // 放棄並清理；未開始時呼叫是 no-op
