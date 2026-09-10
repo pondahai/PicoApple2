@@ -243,7 +243,15 @@ int    g_archive_kind = ARC_RAW;  // ARC_GZ / ARC_ZIP when g_archive_src set
 volatile bool g_archive_dirty = false; // a track was written to the work dsk since last repack
                                        // 兩核都會寫(Core 0 投信/撤回、Core 1 回壓失敗還原) → 必須 volatile
 unsigned long g_motor_off_time = 0;          // 馬達最後停轉時刻(millis)；0 = 無待回壓
-#define ARCHIVE_REPACK_DELAY_MS 2500         // 馬達持續停轉這麼久且 dirty → 自動回壓(防抖)
+// 馬達停轉且 dirty → 自動回壓前的額外等待。
+// 原為 2500ms 的防抖：當時回壓是同步的，會凍住整台機器約 0.4 秒，所以要盡量把
+// 一連串寫入合併成單次重壓。改成 Core 1 背景分片執行之後這個理由消失了，改為 0
+// = 馬達一停轉就立刻回壓，讓 .gz/.zip 盡早跟 work dsk 同步。
+// 注意這不代表「寫入立刻落地」——前面還有兩層與此無關的延遲：磁區寫入要等換軌
+// 或馬達停轉才寫進 work dsk，而馬達本身有 1 秒的停轉延遲(MOTOR_OFF_DELAY_CYCLES，
+// 真實 Disk II 行為，不可改)。所以最壞情況仍是寫入後約 1 秒才進 .gz。
+// 若日後發現回壓被頻繁觸發又反覆 ABORTED，可調回小額防抖(例如 300)。
+#define ARCHIVE_REPACK_DELAY_MS 0
 
 // --- SD 寫入指示燈 -----------------------------------------------------------
 // 指示的是「寫入」而非所有 SD 存取：讀軌本來就有畫面右側的磁軌條可看，寫回才是
@@ -799,8 +807,8 @@ void loop() {
   if (!last_motor_on && motor_on) { g_motor_off_time = 0; }                            // 又轉起來：取消待回壓(避開操作中途)
   last_motor_on = motor_on;
   if (reload_track >= 0) { loadSingleTrack((uint8_t)reload_track); }
-  // 壓縮磁碟防抖回壓：馬達持續停轉超過 REPACK_DELAY 且工作檔已改動 → 整檔回壓一次。
-  // 把一連串寫入(如 DOS SAVE)合併成單次重壓；repackArchiveIfDirty() 內會清 dirty 不重複觸發。
+  // 壓縮磁碟回壓：馬達停轉且工作檔已改動 → 排一次整檔回壓(見 ARCHIVE_REPACK_DELAY_MS)。
+  // postRepackIfDirty() 內會清 dirty，不會重複觸發。
   if (g_archive_dirty && !motor_on && g_motor_off_time != 0 && (millis() - g_motor_off_time > ARCHIVE_REPACK_DELAY_MS)) {
     postRepackIfDirty();               // 投信給 Core 1，模擬器不停
     g_motor_off_time = 0;
