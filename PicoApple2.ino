@@ -237,9 +237,51 @@ String g_current_disk_path = "/MASTER.DSK";   // file the track engine reads/wri
 #define WORK_DSK "/_WORK.DSK"
 String g_archive_src = "";        // original .gz/.zip path, or "" for a plain .dsk
 int    g_archive_kind = ARC_RAW;  // ARC_GZ / ARC_ZIP when g_archive_src set
-bool   g_archive_dirty = false;   // a track was written to the work dsk since last repack
+volatile bool g_archive_dirty = false; // a track was written to the work dsk since last repack
+                                       // 兩核都會寫(Core 0 投信/撤回、Core 1 回壓失敗還原) → 必須 volatile
 unsigned long g_motor_off_time = 0;          // 馬達最後停轉時刻(millis)；0 = 無待回壓
 #define ARCHIVE_REPACK_DELAY_MS 2500         // 馬達持續停轉這麼久且 dirty → 自動回壓(防抖)
+
+// --- 回壓信箱 (Core 0 投信 → Core 1 執行) -------------------------------------
+// 整檔回壓 (gzip 重壓 140KB) 要數百 ms～秒級。原本它跑在 Core 0 的 loop() 裡，
+// 期間 6502 完全停住（畫面停、音樂斷、遊戲卡）。改成信箱後 Core 0 只投信就繼續
+// 跑 apple2_tick()，實際的壓縮由 Core 1 在 loop1() 開頭執行。
+//
+// 代價：回壓期間 Core 1 被佔住 → 畫面與鍵盤掃描停格。但音訊 alarm 是 ISR（見
+// setup1 註解），中斷照樣觸發，所以聲音不斷。淨結果比原本「兩邊一起停」好。
+//
+// 互斥規則：diskFile / SD 同一時間只准一核使用。狀態機保證這點——
+//   IDLE    : Core 0 自由使用 SD
+//   PENDING : 已投信、Core 1 尚未取件。Core 0 若此時要用 SD 可「撤回」（dirty
+//             保留，下次馬達停轉再排一次），不必等
+//   RUNNING : Core 1 已開工，work dsk 必須維持一致快照 → Core 0 只能等
+enum RepackState { RP_IDLE = 0, RP_PENDING, RP_RUNNING };
+volatile uint8_t g_repack_state = RP_IDLE;
+char  g_repack_src[64] = {0};     // 投信當下快照的目標壓縮檔路徑（不跨核共用 String）
+int   g_repack_kind = ARC_RAW;
+
+// Core 1 取件：PENDING → RUNNING。用 res_lock 保護狀態轉換，避免與 Core 0 的
+// 撤回競態造成「Core 0 以為撤回成功、Core 1 同時開工」的雙頭馬車。
+static bool repackTryClaim() {
+  uint32_t irq = spin_lock_blocking(res_lock);
+  bool got = (g_repack_state == RP_PENDING);
+  if (got) g_repack_state = RP_RUNNING;
+  spin_unlock(res_lock, irq);
+  return got;
+}
+
+// Core 0 動 diskFile / SD 前必呼叫：搶回 SD 的使用權。
+// 未開工就撤回（不付等待成本）；已開工只能自旋等完 —— 但因為回壓只在馬達停轉
+// 2.5 秒後才排程，客端此刻正在存取磁碟的機率很低。
+void sdClaimForCore0() {
+  uint32_t irq = spin_lock_blocking(res_lock);
+  if (g_repack_state == RP_PENDING) {
+    g_repack_state = RP_IDLE;       // 撤回：g_archive_dirty 於下方 postRepackIfDirty 還原
+    g_archive_dirty = true;
+  }
+  spin_unlock(res_lock, irq);
+  while (g_repack_state != RP_IDLE) tight_loop_contents();
+}
 bool g_show_menu = false;
 bool g_joy_mode = true;
 int g_last_m_on = -1;
@@ -308,6 +350,7 @@ void markSdRemoved() {
 }
 
 void flushDirtyTrack() {
+  sdClaimForCore0();
   if (!diskFile) return;
   bool is_dirty = false; uint8_t target_track = 0;
   uint32_t irq = spin_lock_blocking(res_lock);
@@ -327,6 +370,7 @@ void flushDirtyTrack() {
 }
 
 void loadSingleTrack(uint8_t track) {
+  sdClaimForCore0();
   if (!diskFile) return;
   g_emu_paused = true; flushDirtyTrack(); 
   uint32_t offset = (uint32_t)track * 4096;
@@ -346,6 +390,7 @@ void loadSingleTrack(uint8_t track) {
 // 開啟使用者選的磁碟路徑：純 .dsk 直接開；.gz/.zip 先解壓到 WORK_DSK 再開該檔，
 // 並記住原壓縮檔路徑 (g_archive_src) 以便換片時回壓。回傳 diskFile 是否開啟成功。
 bool openDiskByPath(const String& path) {
+  sdClaimForCore0();
   if (diskFile) diskFile.close();
   int kind = archive_kind(path.c_str());
   if (kind == ARC_GZ || kind == ARC_ZIP) {
@@ -368,6 +413,7 @@ bool openDiskByPath(const String& path) {
 // 若目前磁碟來自壓縮檔且 work dsk 已被寫過，把 work dsk 回壓覆蓋原檔。
 // 在換片前呼叫；一次性整檔重壓（暫存檔→改名），故不在每次磁區寫入時做。
 void repackArchiveIfDirty() {
+  sdClaimForCore0();                       // 撤回/等完背景回壓，避免兩核同時動 work dsk
   if (g_archive_src.length() == 0 || !g_archive_dirty) return;
   flushDirtyTrack();                       // 確保最後一軌已落地到 work dsk
   if (diskFile) diskFile.close();
@@ -375,6 +421,36 @@ void repackArchiveIfDirty() {
   Serial.printf("[ARC] Repack %s: %s\n", g_archive_src.c_str(), ok ? "OK" : "FAIL");
   g_archive_dirty = false;
   diskFile = SD.open(WORK_DSK, "r+"); if (!diskFile) diskFile = SD.open(WORK_DSK, "r");
+}
+
+// Core 0：把回壓工作投進信箱後立刻返回，不等壓縮完成。
+// 最後一軌仍在此同步落地（4KB，~10ms），確保 Core 1 讀到的 work dsk 是完整快照。
+void postRepackIfDirty() {
+  if (g_archive_src.length() == 0 || !g_archive_dirty) return;
+  if (g_repack_state != RP_IDLE) return;          // 信箱未清空 → 這輪不投，下次再試
+  flushDirtyTrack();
+  if (!diskFile) return;                          // flush 途中判定拔卡 → 放棄
+  strncpy(g_repack_src, g_archive_src.c_str(), sizeof(g_repack_src) - 1);
+  g_repack_src[sizeof(g_repack_src) - 1] = 0;
+  g_repack_kind = g_archive_kind;
+  g_archive_dirty = false;                        // 撤回或失敗時會還原
+  __dmb();                                        // 參數先落地，最後才設旗標
+  g_repack_state = RP_PENDING;
+}
+
+// Core 1：取件並執行整檔回壓。期間 Core 0 被 sdClaimForCore0() 擋在 SD 之外。
+void serviceRepack() {
+  if (g_repack_state != RP_PENDING) return;
+  if (!repackTryClaim()) return;                  // 被 Core 0 撤回
+  tft_dma.waitTransferDone();                     // 讓 SPI0 靜下來再動 SPI1 上的 SD
+  uint32_t t0 = millis();
+  if (diskFile) diskFile.close();
+  bool ok = archive_compress(WORK_DSK, g_repack_src, g_repack_kind);
+  diskFile = SD.open(WORK_DSK, "r+"); if (!diskFile) diskFile = SD.open(WORK_DSK, "r");
+  if (!ok) g_archive_dirty = true;                // 失敗 → 留著 dirty，下次停轉重試
+  Serial.printf("[ARC] BG repack %s: %s (%lu ms)\n", g_repack_src, ok ? "OK" : "FAIL", millis() - t0);
+  __dmb();
+  g_repack_state = RP_IDLE;
 }
 
 // 持久化到 LASTDISK 的路徑：壓縮檔記原檔，純 dsk 記自身（不可記 work dsk）。
@@ -597,6 +673,7 @@ void loop() {
   // 熱插拔：未掛載時每 ~500ms 試掛一次（本板無硬體 card-detect，只能輪詢）。
   // 拔卡偵測走惰性路徑（loadSingleTrack/flushDirtyTrack 存取失敗 → markSdRemoved）。
   if (!g_sd_mounted) {
+    sdClaimForCore0();                 // 探卡/掛載也要動 SPI1，先搶回 SD 使用權
     static unsigned long last_sd_probe = 0;
     if (millis() - last_sd_probe > 500) {
       last_sd_probe = millis();
@@ -613,6 +690,8 @@ void loop() {
   }
 
   g_c0_checkpoint = 2;
+  // 以下選單請求全都直接存取 SD（目錄列舉、LASTDISK.TXT），先搶回使用權。
+  if (req_scan_disks || req_menu_root_reset || req_menu_fill >= 0 || req_load_disk_idx >= 0 || req_reload_track0) sdClaimForCore0();
   if (req_scan_disks && !ack_scan_disks) { menuRootClose(); scanDiskFiles(); ack_scan_disks = true; }
   if (req_menu_root_reset) { req_menu_root_reset = false; menuRootClose(); }
   if (req_menu_fill >= 0) { fillDiskWindow(req_menu_fill); disk_window_base = req_menu_fill; req_menu_fill = -1; menu_fill_done = true; }
@@ -666,7 +745,7 @@ void loop() {
   // 壓縮磁碟防抖回壓：馬達持續停轉超過 REPACK_DELAY 且工作檔已改動 → 整檔回壓一次。
   // 把一連串寫入(如 DOS SAVE)合併成單次重壓；repackArchiveIfDirty() 內會清 dirty 不重複觸發。
   if (g_archive_dirty && !motor_on && g_motor_off_time != 0 && (millis() - g_motor_off_time > ARCHIVE_REPACK_DELAY_MS)) {
-    repackArchiveIfDirty();
+    postRepackIfDirty();               // 投信給 Core 1，模擬器不停
     g_motor_off_time = 0;
   }
 
@@ -914,6 +993,7 @@ void scan_matrix() {
 
 void loop1() {
   g_core1_heartbeat++;
+  serviceRepack();   // 收信：背景回壓（會佔住 Core 1 數百 ms，但 Core 0 續跑）
   unsigned long now = millis();
 
   static unsigned long last_monitor_t = 0;
