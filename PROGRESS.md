@@ -1,7 +1,13 @@
 # 🍎 PicoApple2 - 專案進度表
 
-## 🚀 當前版本：v1.1 (Stability Patch)
+## 🚀 當前版本：v1.2 (Background Write-back)
+SD 回寫不再讓模擬器停頓：壓縮磁碟的整檔回壓改由 Core 1 分片執行，6502 與音訊全程不中斷，畫面停格也一併消除。同時拿掉已無必要的 2.5 秒回壓防抖，並加上板載 LED 作為 SD 寫入指示燈。
+
+<details><summary>v1.1 (Stability Patch)</summary>
+
 專案已修復了關鍵的啟動同步死鎖，並完整實作了 F1-F3 系統功能鍵與 GPIO 高頻掃描。
+
+</details>
 
 ---
 
