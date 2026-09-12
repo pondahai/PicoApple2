@@ -45,6 +45,16 @@ const uint16_t palette[16] = {
   0xA200, 0xF400, 0x8410, 0xF81F, 0x07E0, 0xFFE0, 0x07FF, 0xFFFF
 };
 
+// 綠色監視器模式（Fn+7 切換）。MONO_FG 取 P1 磷光的偏亮綠(#33FF33)，
+// 比純 0x07E0 柔和，也和狀態列現用的 0x07E0 區分得開。
+#define MONO_FG 0x37E6
+// LORES 專用：把 palette[] 各色的亮度映到四階綠（編譯期常數，執行期零成本）。
+// 不做逐色亮度運算，否則整張 LORES 會糊成同一片綠。
+const uint16_t palette_green[16] = {
+  0x0000, 0x12A2, 0x12A2, 0x1C63, 0x12A2, 0x1C63, 0x1C63, 0x2E45,
+  0x12A2, 0x1C63, 0x1C63, 0x2E45, 0x2E45, 0x2E45, 0x2E45, MONO_FG
+};
+
 spin_lock_t *res_lock;
 spin_lock_t *fifo_lock;
 static uint16_t scanline_buffers[2][280];
@@ -69,6 +79,9 @@ float g_speed_multipliers[] = {1.0f, 1.2f, 1.4f, 1.5f};
 volatile int g_speed_idx = 0;
 volatile uint8_t g_f_key_event = 0;
 volatile bool g_emu_paused = false;
+// 螢幕顏色模式：false = 彩色(預設)，true = 綠色監視器。寫入者與讀取者同為 Core 1
+// (scan_matrix() 就嵌在掃描線繪製中段)，不需要 spin lock；最壞只是切換當幀上下半屏不同色。
+volatile bool g_mono_green = false;
 volatile bool g_boot_ready = false;
 volatile bool g_core0_ready = false; // Core 0 已完成序列埠與 apple2_init()，Core 1 等此旗標再操作硬體
 volatile bool g_sd_mounted = false; // SD 卡是否已掛載且檔案系統可用（熱插拔狀態）
@@ -841,6 +854,8 @@ void updateStatusLine() {
   drawString(135, 222, "SPEED: ", 0x07E0, 0x0000);
   sprintf(buf, "X%.1f", g_speed_multipliers[g_speed_idx]);
   drawString(184, 222, buf, 0x0000, 0x07E0);
+  // 顯示右側：螢幕顏色模式
+  drawString(228, 222, g_mono_green ? "GREEN" : "COLOR", 0x0000, 0x07E0);
 }
 
 // 依目前選取項調整捲動視窗，確保高亮列落在可視範圍內（含上下繞回）。
@@ -1023,6 +1038,9 @@ void scan_matrix() {
             uint8_t kb = keymap_base[r][c];
             if (kb >= '1' && kb <= '5') g_f_key_event = kb - '0';
             else if (kb == 'c') g_caps_lock = !g_caps_lock;   // Fn+C
+            // Fn+7 = 彩色 / 綠色監視器切換。純翻旗標，不佔用 g_f_key_event
+            // （那條路是給 reset/選單這種重動作走的），矩陣掃描本身已是邊緣觸發。
+            else if (kb == '7') { g_mono_green = !g_mono_green; updateStatusLine(); }
           }
           else {
             if (k >= 209 && k <= 214) { if (!g_joy_mode && k <= 212) { if (k == 209) k = 0x0B; else if (k == 210) k = 0x0A; else if (k == 211) k = 0x08; else if (k == 212) k = 0x15; } else k = 0; } else if (k == 203) k = 0x0D; else if (k == 207) k = 0x1B; else if (k == 204) k = 0x08;
@@ -1190,10 +1208,21 @@ void loop1() {
                 for (int col = 0; col < 40; col++) {
                   uint8_t raw = ram[r_addr + col], c_idx = raw & 0x7F; if (raw < 0x80) { if (c_idx < 0x20) c_idx += 0x40; else if (c_idx >= 0x60) c_idx -= 0x40; }
                   bool inv = (raw < 0x40) || (raw < 0x80 && blink_on); uint8_t font = char_rom[c_idx * 8 + (y % 8)];
-                  for (int x = 0; x < 7; x++) { bool p = (font & (1 << (6 - x))) != 0; if (inv) p = !p; line_ptr[col * 7 + x] = __builtin_bswap16(p ? 0xFFFF : 0x0000); }
+                  uint16_t fg = g_mono_green ? MONO_FG : 0xFFFF;
+                  for (int x = 0; x < 7; x++) { bool p = (font & (1 << (6 - x))) != 0; if (inv) p = !p; line_ptr[col * 7 + x] = __builtin_bswap16(p ? fg : 0x0000); }
                 }
               } else if (hires_m) {
                 uint16_t r_addr = get_hires_row_addr(y, page2); bool p_bit = false;
+                if (g_mono_green) {
+                  // 綠色模式不做 artifact 上色：點亮即綠。少了鄰位讀取與偶奇判斷，
+                  // 這條路徑比彩色還快，不會吃掉每行的時序預算。
+                  for (int col = 0; col < 40; col++) {
+                    uint8_t b = ram[r_addr + col];
+                    for (int bit = 0; bit < 7; bit++) {
+                      line_ptr[col * 7 + bit] = __builtin_bswap16((b & (1 << bit)) ? MONO_FG : 0x0000);
+                    }
+                  }
+                } else
                 for (int col = 0; col < 40; col++) {
                   uint8_t b = ram[r_addr + col]; bool shift = (b & 0x80) != 0;
                   for (int bit = 0; bit < 7; bit++) {
@@ -1206,7 +1235,7 @@ void loop1() {
                 uint16_t r_addr = get_text_row_addr(y / 8, page2); bool lower = (y % 8) < 4;
                 for (int col = 0; col < 40; col++) {
                   uint8_t val = ram[r_addr + col], c_idx = lower ? (val & 0x0F) : (val >> 4);
-                  uint16_t color = palette[c_idx & 0x0F]; for (int x = 0; x < 7; x++) { line_ptr[col * 7 + x] = __builtin_bswap16(color); }
+                  uint16_t color = g_mono_green ? palette_green[c_idx & 0x0F] : palette[c_idx & 0x0F]; for (int x = 0; x < 7; x++) { line_ptr[col * 7 + x] = __builtin_bswap16(color); }
                 }
               }
               
