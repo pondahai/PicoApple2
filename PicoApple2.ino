@@ -40,10 +40,24 @@
 
 TFT_DMA tft_dma(PIN_DISPLAY_CS, PIN_DISPLAY_DC, PIN_DISPLAY_RST, PIN_DISPLAY_MOSI, PIN_DISPLAY_SCK);
 
+// LORES 16 色。小面板上原始 Apple II 色太沉，這裡對每色做「保色相提亮」：
+//   out = k * c + w   （k 為增益、w 為等量白底）
+// 兩項運算都不改 HSV 色相 —— w 對三通道等量相加只降飽和度，k 只縮放明度；
+// 刻意不用 per-channel gamma，那會改變 (mid-min)/(max-min) 而讓色相偏移。
+// 暗色組 (1/2/4/8) 只抬到剛好可辨，仍明顯低於各自的亮色對應 (11/6/12/9)，
+// 維持 Apple II 調色盤原本的明暗配對關係。5/10 兩灰在真機上本就同色，不拆。
 const uint16_t palette[16] = {
-  0x0000, 0xA010, 0x0014, 0xA01F, 0x0500, 0x8410, 0x001F, 0x051F,
-  0xA200, 0xF400, 0x8410, 0xF81F, 0x07E0, 0xFFE0, 0x07FF, 0xFFFF
+  0x0000, 0xC854, 0x109D, 0xB9DF, 0x0E41, 0x8410, 0x421F, 0x257F,
+  0xCAA1, 0xF441, 0x8410, 0xF99F, 0x37E6, 0xFFE0, 0x07FF, 0xFFFF
 };
+
+// HIRES artifact 四色（violet / green / blue / orange），與 LORES 分離。
+// HIRES 每個像素只有 1 px 寬的細直條，比 LORES 的 7x4 色塊更難判讀，
+// 所以白底量 w 下得比 LORES 同色更重；色相一樣用 out = k*c + w 保持不變。
+#define HIRES_VIOLET 0xBA5F
+#define HIRES_GREEN  0x3FE7
+#define HIRES_BLUE   0x5ADF
+#define HIRES_ORANGE 0xFCA5
 
 // 綠色監視器模式（Fn+7 切換）。MONO_FG 取 P1 磷光的偏亮綠(#33FF33)，
 // 比純 0x07E0 柔和，也和狀態列現用的 0x07E0 區分得開。
@@ -1227,7 +1241,7 @@ void loop1() {
                   uint8_t b = ram[r_addr + col]; bool shift = (b & 0x80) != 0;
                   for (int bit = 0; bit < 7; bit++) {
                     bool c_bit = (b & (1 << bit)) != 0, n_bit = (bit < 6) ? ((b & (1 << (bit + 1))) != 0) : ((col < 39) ? ((ram[r_addr + col + 1] & 0x01) != 0) : false);
-                    uint16_t color = 0; if (c_bit) { if (p_bit || n_bit) color = 0xFFFF; else { bool even = ((col * 7 + bit) % 2) == 0; color = (!shift) ? (even ? palette[3] : palette[12]) : (even ? palette[6] : palette[9]); } }
+                    uint16_t color = 0; if (c_bit) { if (p_bit || n_bit) color = 0xFFFF; else { bool even = ((col * 7 + bit) % 2) == 0; color = (!shift) ? (even ? HIRES_VIOLET : HIRES_GREEN) : (even ? HIRES_BLUE : HIRES_ORANGE); } }
                     line_ptr[col * 7 + bit] = __builtin_bswap16(color); p_bit = c_bit;
                   }
                 }
