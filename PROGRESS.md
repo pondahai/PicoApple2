@@ -15,7 +15,8 @@ SD 回寫不再讓模擬器停頓：壓縮磁碟的整檔回壓改由 Core 1 分
 *   **🦀 Rust 模擬核心**: 完成 6502 模擬、Language Card 切換。
 *   **📺 繪圖系統**: TFT DMA 掃描線雙緩衝 (62.5MHz SPI)。
 *   **⚡ 效能優化**: RP2040 250MHz 穩定運行。
-*   **🖥️ 綠色監視器**: `Fn+7` 切換 彩色 / 綠色單色顯示（TEXT / HIRES / LORES 全模式），狀態列顯示 COLOR/GREEN。
+*   **🖥️ 綠色監視器**: `Fn+7`（終端機 `F7`）切換 彩色 / 綠色單色顯示（TEXT / HIRES / LORES 全模式），狀態列顯示 COLOR/GREEN。
+*   **📊 隨叫隨到的說明列**: 螢幕底部狀態列 + F Key 速查列平時隱藏，按 `Fn` 或任一 F 鍵亮 3 秒後自動收起。
 *   **🔄 系統重置**: 實作 F1 (Warm) / F2 (Cold) Reset，支援磁軌 0 重啟。
 *   **💾 磁碟系統**: 支援 .DSK 掛載、20MHz SPI 高速模式、開機自動載入。
 *   **📦 壓縮磁碟**: 支援 `.gz` / `.zip` 載入與寫回(gz 多成員真壓縮、zip stored;uzlib streaming)。
