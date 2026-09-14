@@ -93,6 +93,12 @@ float g_speed_multipliers[] = {1.0f, 1.2f, 1.4f, 1.5f};
 volatile int g_speed_idx = 0;
 volatile uint8_t g_f_key_event = 0;
 volatile bool g_emu_paused = false;
+// 底部兩列說明的顯示狀態：平時隱藏，按下 Fn 或任一 F 鍵動作時亮 3 秒。
+// 觸發(updateStatusLine)發生在 Core 1 的 VBLANK 段與開機的 setup()，
+// 自動隱藏的判斷(statusLineTick)同樣掛在 VBLANK，兩者不會同時碰 SPI。
+volatile bool g_status_visible = false;
+volatile unsigned long g_status_show_t = 0;
+#define STATUS_SHOW_MS 3000
 // 螢幕顏色模式：false = 彩色(預設)，true = 綠色監視器。寫入者與讀取者同為 Core 1
 // (scan_matrix() 就嵌在掃描線繪製中段)，不需要 spin lock；最壞只是切換當幀上下半屏不同色。
 volatile bool g_mono_green = false;
@@ -859,17 +865,69 @@ void drawString(uint16_t x, uint16_t y, String s, uint16_t color, uint16_t bg) {
   for (int i = 0; i < s.length(); i++) { tft_dma.drawChar(x + (i * 7), y, s[i], color, bg, font); }
 }
 
-void updateStatusLine() {
+// 螢幕底部兩列（模擬畫面只到 y=191，192 以下全是空白可用）：
+//   y=210 狀態列（可變）  y=222 F Key 速查列（固定不變）
+// 平時兩列都不畫，遊戲畫面下方保持全黑；按 Fn（或任一 F 鍵動作）才亮 3 秒。
+#define STATUS_Y 210
+#define FKEY_Y   222
+// 清除範圍涵蓋兩列的字高(8px)再各留 2px 邊：y=208..231。
+// 不用 fillScreen(一次約 100ms)，這塊 320x24 約 2ms，塞得進 VBLANK。
+#define STATUS_CLEAR_Y 208
+#define STATUS_CLEAR_H 24
+
+// 字型固定 7px 寬，一列從 x=6 起算最多 44 字 —— 下面這串剛好填滿：
+//   "F1:WRST F2:CRST F3:DISK F4:JOY F5:SPD F7:GRN"
+// 欄位起始值是字元索引(非像素)，鍵名 3 字、功能縮寫接在其後。
+// 註：實機是 Fn+數字，但列首不放 "FN+" 前綴（會吃掉 4 字得砍一項）。
+// 註：CapsLock 不列 —— 鍵盤上有實體 CAPS 鍵(偽碼 208)可直接按，列出來反而誤導。
+struct FKeyHint { uint8_t col; const char* key; const char* label; };
+static const FKeyHint FKEY_HINTS[] = {
+  {  0, "F1:", "WRST" },   // warm reset
+  {  8, "F2:", "CRST" },   // cold reset + 重載 track0
+  { 16, "F3:", "DISK" },   // 磁碟選單
+  { 24, "F4:", "JOY"  },   // 搖桿/鍵盤
+  { 31, "F5:", "SPD"  },   // 速度循環
+  { 38, "F7:", "GRN"  },   // 彩色/綠螢幕
+};
+
+// 實際把兩列畫出來。只由 updateStatusLine() 呼叫。
+static void paintStatusLines() {
   char buf[64];
   // 顯示左側：搖桿/鍵盤模式
-  drawString(20, 222, "ARROWS: ", 0x07E0, 0x0000);
-  drawString(76, 222, g_joy_mode ? "JOYSTICK" : "KEYBOARD", 0x0000, 0x07E0);
+  drawString(20, STATUS_Y, "ARROWS: ", 0x07E0, 0x0000);
+  drawString(76, STATUS_Y, g_joy_mode ? "JOYSTICK" : "KEYBOARD", 0x0000, 0x07E0);
   // 顯示中間：模擬速度
-  drawString(135, 222, "SPEED: ", 0x07E0, 0x0000);
+  drawString(135, STATUS_Y, "SPEED: ", 0x07E0, 0x0000);
   sprintf(buf, "X%.1f", g_speed_multipliers[g_speed_idx]);
-  drawString(184, 222, buf, 0x0000, 0x07E0);
+  drawString(184, STATUS_Y, buf, 0x0000, 0x07E0);
   // 顯示右側：螢幕顏色模式
-  drawString(228, 222, g_mono_green ? "GREEN" : "COLOR", 0x0000, 0x07E0);
+  drawString(228, STATUS_Y, g_mono_green ? "GREEN" : "COLOR", 0x0000, 0x07E0);
+
+  // F Key 速查列：鍵名綠、功能縮寫白，沿用上一列「標籤綠、內容亮」的語彙。
+  for (uint8_t i = 0; i < sizeof(FKEY_HINTS) / sizeof(FKEY_HINTS[0]); i++) {
+    uint16_t x = 6 + FKEY_HINTS[i].col * 7;
+    drawString(x, FKEY_Y, FKEY_HINTS[i].key, 0x07E0, 0x0000);
+    drawString(x + 21, FKEY_Y, FKEY_HINTS[i].label, 0xFFFF, 0x0000);
+  }
+}
+
+// 觸發顯示：亮起（若原本是暗的）並把 3 秒倒數歸零。
+// 沿用原本的名字，所以每個「狀態變動後重畫」的既有呼叫點都自動變成一次觸發
+// —— 包含 F4/F5/Fn+7 切換、以及離開選單後的重畫。
+void updateStatusLine() {
+  g_status_show_t = millis();
+  g_status_visible = true;
+  paintStatusLines();
+}
+
+// 倒數到期就把兩列擦掉。由 Core 1 的 VBLANK 每幀呼叫一次。
+// 選單開啟時不動手：選單畫面自己佔滿整頁(下緣外框就在 y=228)，擦了會破洞。
+void statusLineTick() {
+  if (g_show_menu) { g_status_visible = false; return; }   // 選單的 fillScreen 已經清乾淨了
+  if (!g_status_visible) return;
+  if (millis() - g_status_show_t <= STATUS_SHOW_MS) return;
+  g_status_visible = false;
+  tft_dma.drawRect(0, STATUS_CLEAR_Y, 320, STATUS_CLEAR_H, 0x0000);
 }
 
 // 依目前選取項調整捲動視窗，確保高亮列落在可視範圍內（含上下繞回）。
@@ -1041,7 +1099,7 @@ void scan_matrix() {
       bool p = keyState[r][c];
       if (p != lastKeyState[r][c] && (now_t - lastKeyTime[r][c] > 30)) {
         lastKeyTime[r][c] = now_t; lastKeyState[r][c] = p;
-        if (r == 3 && c == 7) { isFnPressed = p; continue; }
+        if (r == 3 && c == 7) { isFnPressed = p; if (p) updateStatusLine(); continue; }  // 按下 Fn 就先把說明列叫出來
         if (r == 3 && c == 5 || r == 2 && c == 6) continue;
         if (p) {
           uint8_t k = isShiftPressed ? keymap_shift[r][c] : keymap_base[r][c];
@@ -1051,7 +1109,7 @@ void scan_matrix() {
             // 判斷用不帶 Shift 的 keymap_base，省掉一整串 '2'/'@' 的成對比對。
             uint8_t kb = keymap_base[r][c];
             if (kb >= '1' && kb <= '5') g_f_key_event = kb - '0';
-            else if (kb == 'c') g_caps_lock = !g_caps_lock;   // Fn+C
+            else if (kb == 'c') { g_caps_lock = !g_caps_lock; updateStatusLine(); }   // Fn+C
             // Fn+7 = 彩色 / 綠色監視器切換。純翻旗標，不佔用 g_f_key_event
             // （那條路是給 reset/選單這種重動作走的），矩陣掃描本身已是邊緣觸發。
             else if (kb == '7') { g_mono_green = !g_mono_green; updateStatusLine(); }
@@ -1072,6 +1130,9 @@ void scan_matrix() {
   if (g_f_key_event > 0) {
       if (millis() - last_fkey_t > 300) {
           last_fkey_t = millis();
+          // 任一 F 鍵動作都算一次觸發：內部是在 Fn 已點亮後把倒數蓋掉重算，
+          // 外接鍵盤沒有 Fn，就靠這裡讓說明列現身(F1~F5 走同一個信箱)。
+          updateStatusLine();
           if (g_f_key_event == 1) { uint32_t irq = spin_lock_blocking(res_lock); apple2_warm_reset(); spin_unlock(res_lock, irq); }
           else if (g_f_key_event == 2) { uint32_t irq = spin_lock_blocking(res_lock); apple2_reset(); spin_unlock(res_lock, irq); req_reload_track0 = true; }
           else if (g_f_key_event == 3) { if (!g_show_menu) { g_emu_paused = true; req_scan_disks = true; ack_scan_disks = false; g_show_menu = true;
@@ -1197,6 +1258,7 @@ void loop1() {
       // Execute the matrix scan ONLY once per frame during VBLANK.
       // This is perfectly synced with 60Hz and completely avoids SPI DMA running concurrently.
       scan_matrix();
+      statusLineTick();      // 說明列倒數：與 scan_matrix 同在 VBLANK，SPI 匯流排此刻是靜的
       // scan_matrix() 可能在此剛把 g_show_menu 設為 true 並畫好「LOADING MENU」畫面；
       // 若不在此中止，下方的模擬掃描線繪製會立刻把選單畫面覆蓋掉 → 進選單前一閃花屏。
       if (g_show_menu) return;
