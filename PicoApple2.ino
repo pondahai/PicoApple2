@@ -756,6 +756,7 @@ void loop() {
           else if (strcmp(esc_buf, "[13~") == 0 || strcmp(esc_buf, "OR") == 0) g_f_key_event = 3;
           else if (strcmp(esc_buf, "[15~") == 0 || strcmp(esc_buf, "OS") == 0) g_f_key_event = 4;
           else if (strcmp(esc_buf, "[17~") == 0) g_f_key_event = 5;
+          else if (strcmp(esc_buf, "[18~") == 0) g_f_key_event = 7;   // F7：彩色/綠螢幕（內部是 Fn+7）
         } else if (esc_buf[0] == 'O') { if (sK == 'P') g_f_key_event = 1; else if (sK == 'Q') g_f_key_event = 2; else if (sK == 'R') g_f_key_event = 3; }
         esc_state = 0;
       }
@@ -1145,6 +1146,9 @@ void scan_matrix() {
             } else { g_menu_cmd = 4; } }
           else if (g_f_key_event == 4) { g_joy_mode = !g_joy_mode; updateStatusLine(); }
           else if (g_f_key_event == 5) { g_speed_idx = (g_speed_idx + 1) % 4; updateStatusLine(); }
+          // 7 = 綠螢幕切換。內部鍵盤的 Fn+7 是直接翻旗標(不走信箱)，這條是留給
+          // 外接鍵盤/網頁端的入口；翻完要再畫一次，上面那次畫的還是舊值。
+          else if (g_f_key_event == 7) { g_mono_green = !g_mono_green; updateStatusLine(); }
       }
       g_f_key_event = 0;
   }
