@@ -721,7 +721,17 @@ void loop() {
             if (idx == 0) pushKey(0x0B); else if (idx == 1) pushKey(0x0A); else if (idx == 2) pushKey(0x08); else if (idx == 3) pushKey(0x15);     
           }
         } else if (type == 'K' && stat == 1) {          if (g_show_menu) { if (idx == 0x0D) g_menu_cmd = 3; else if (idx == 0x1B) g_menu_cmd = 4; }
-          if (idx == 112) g_f_key_event = 1; else if (idx == 113) g_f_key_event = 2; else if (idx == 114) g_f_key_event = 3; else pushKey(idx);
+          // JS keyCode 112~123 = F1~F12。這整段都不是可列印字元，必須全部吃掉：
+          // 漏下去會被當成 ASCII 送進模擬器（例如 115 = F4 會憑空打出一個 's'）。
+          if (idx >= 112 && idx <= 123) {
+            if (idx == 112) g_f_key_event = 1;
+            else if (idx == 113) g_f_key_event = 2;
+            else if (idx == 114) g_f_key_event = 3;
+            else if (idx == 115) g_f_key_event = 4;
+            else if (idx == 116) g_f_key_event = 5;
+            else if (idx == 118) g_f_key_event = 7;
+            // F6 / F8~F12 無對應功能，吃掉不送
+          } else pushKey(idx);
         } else if (type == 'P') {
           // 'P' = 貼上字元，進 FIFO 保序（網頁終端 simulateTyping 送出）
           pushPasteKey(idx);
@@ -754,10 +764,17 @@ void loop() {
           else if (strcmp(esc_buf, "[11~") == 0 || strcmp(esc_buf, "OP") == 0) g_f_key_event = 1;
           else if (strcmp(esc_buf, "[12~") == 0 || strcmp(esc_buf, "OQ") == 0) g_f_key_event = 2;
           else if (strcmp(esc_buf, "[13~") == 0 || strcmp(esc_buf, "OR") == 0) g_f_key_event = 3;
-          else if (strcmp(esc_buf, "[15~") == 0 || strcmp(esc_buf, "OS") == 0) g_f_key_event = 4;
-          else if (strcmp(esc_buf, "[17~") == 0) g_f_key_event = 5;
+          else if (strcmp(esc_buf, "[14~") == 0 || strcmp(esc_buf, "OS") == 0) g_f_key_event = 4;
+          else if (strcmp(esc_buf, "[15~") == 0) g_f_key_event = 5;
           else if (strcmp(esc_buf, "[18~") == 0) g_f_key_event = 7;   // F7：彩色/綠螢幕（內部是 Fn+7）
-        } else if (esc_buf[0] == 'O') { if (sK == 'P') g_f_key_event = 1; else if (sK == 'Q') g_f_key_event = 2; else if (sK == 'R') g_f_key_event = 3; }
+          // 註：F6 (`[17~`) 沒有對應功能，留空不接 —— 底部速查列上也沒有 F6。
+        } else if (esc_buf[0] == 'O') {
+          // VT100 式 SS3 序列：ESC O P/Q/R/S = F1~F4。
+          // （上面 '[' 分支裡那兩個 strcmp(esc_buf,"OP"/"OS") 永遠不會成立 ——
+          //   進得去那個分支就表示 esc_buf[0] 是 '['。真正生效的是這裡。）
+          if (sK == 'P') g_f_key_event = 1; else if (sK == 'Q') g_f_key_event = 2;
+          else if (sK == 'R') g_f_key_event = 3; else if (sK == 'S') g_f_key_event = 4;
+        }
         esc_state = 0;
       }
     }
