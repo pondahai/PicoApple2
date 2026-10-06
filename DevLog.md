@@ -1,5 +1,29 @@
 # Pico Apple II Emulator - Development Log
 
+## 2026-10-06: F6 記憶體監視器（移植自 apple2emu，實機驗證通過 ✅）
+
+按 **F6**（機身 **Fn+6**）暫停模擬、整頁顯示 hex 編輯器；再按 F6 或 Esc 恢復。
+
+*   **版面（解析度不足的解法）**：320x240 用 7x8 Apple 字型只有 **45 欄 x 30 列**，
+    放不下桌面版一列 16 bytes(~72 欄)。改為**一列 8 bytes**：
+    `0300: A9 00 8D 30 C0 4C 00 03  )..0.L..` 共 39 欄。一頁 24 列 = 192 bytes；
+    第 0 列標題、第 27 列狀態（`$addr = $hex 十進位 %二進位` / GOTO 輸入 / 錯誤訊息）、最後兩列說明。
+*   **操作**：方向鍵移動、PgUp/PgDn（機身 Shift 或 ALT + 上/下）換頁、`G` 跳位址、
+    Enter 切換編輯（輸入 0-F 依序寫高/低 nibble）、Esc 離開。機身 A 鈕=Enter、B 鈕=Esc。
+    開著時 F1~F5/F7 一律擋掉；網頁貼上('P')直接丟棄，免得恢復後才打進 Apple II。
+*   **Rust core**：新增 `apple2_peek` / `apple2_poke`（`Apple2Memory::peek/poke`）。
+    **不記匯流排存取、不翻 soft switch**；I/O 區無固定值回 false、不可寫（$C000 鍵盤鎖存、$C600 磁碟 ROM 可讀）；
+    $D000+ 寫進目前 LC bank（無視寫保護），讀 ROM 時回傳 2 讓畫面提示「寫了但看不到」。測試：`peek_poke_test.rs`。
+*   **⚠️ 暫停用獨立旗標 `g_show_memmon`，不能共用 `g_emu_paused`**：`loadSingleTrack()` 結尾會把
+    `g_emu_paused` 清回 false（SD 熱插拔時會觸發），共用的話監視器開著時模擬會被偷偷放行。
+*   **繪製**：字元格影子緩衝差分重繪，只送有變的格子，移游標只要幾 ms（不用 `fillScreen` ~100ms）。
+    開啟時先 `waitTransferDone()` + 拉 CS 再清畫面；VBLANK 的 `scan_matrix()` 之後同選單一樣立刻 return
+    （見選單花屏教訓）。說明列在監視器期間不畫。Core 1 監視器迴圈把矩陣掃描限速到 ~200Hz。
+*   **按鍵路由**：序列埠(Core 0)與矩陣(Core 1)都丟進監視器專用的小佇列（`fifo_lock` 保護），Core 1 消耗。
+    F6 入口：ANSI `ESC [17~`、'K' 封包 keyCode 117、Fn+6；網頁 F6 改送 `[17~`（**兩端一起改**）。
+*   **恢復**：音訊錨點由 `audioPump()` 偵測大幅漂移自動重校，與關選單同路徑，實機 beep 音高正常。
+*   **未做**：底部速查列已滿 44 字，沒有放 F6。
+
 ## 2026-09-14: 底部說明列改為按鍵喚出 3 秒自動隱藏 + 網頁補 F7（實機驗證通過 ✅）
 
 完整記錄見 `DevLog_Entry_2026-09-14.md`。摘要：

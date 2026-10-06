@@ -34,6 +34,10 @@ uint16_t apple2_get_write_log(uint8_t* out_buffer); // 獲取 CPU 實體寫入�
 int32_t apple2_needs_disk_reload(); 
 void apple2_load_track(uint8_t track, const uint8_t* data, uint32_t size);
 
+// 記憶體監視器 (F6)：不翻 soft switch 的讀寫
+bool apple2_peek(uint16_t addr, uint8_t* out);   // I/O 區無固定值 → false
+uint8_t apple2_poke(uint16_t addr, uint8_t data); // 0=I/O 不可寫 1=OK 2=寫入 LC 但目前讀 ROM
+
 // 兼容舊介面 (已廢棄)
 void apple2_update_framebuffer();
 const uint8_t* apple2_get_framebuffer();

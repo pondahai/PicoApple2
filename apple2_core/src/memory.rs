@@ -196,6 +196,46 @@ impl Apple2Memory {
             unsafe { *(core::ptr::addr_of!(crate::RAM_48K) as *const u8).add(addr) }
         } else { 0 }
     }
+
+    /// $D000-$FFFF 在 LC_RAM_16K 裡的索引（依目前選的 $D000 bank）。
+    fn lc_index(&self, addr: u16) -> usize {
+        if addr < 0xE000 {
+            let base = (addr - 0xD000) as usize;
+            if self.lc_bank2 { base } else { base + 4096 }
+        } else {
+            (addr - 0xE000) as usize + 8192
+        }
+    }
+
+    /// 監視器(F6)用的讀取：不記匯流排存取、不翻任何 soft switch。
+    /// I/O 區沒有固定值者回傳 None（$C000 鍵盤鎖存與 $C600 磁碟 ROM 例外）。
+    pub fn peek(&self, addr: u16) -> Option<u8> {
+        match addr {
+            0x0000..=0xBFFF => Some(unsafe { *(core::ptr::addr_of!(crate::RAM_48K) as *const u8).add(addr as usize) }),
+            0xC000..=0xC00F => Some(self.keyboard_latch),
+            0xC600..=0xC6FF => Some(self.disk2.rom[(addr & 0xFF) as usize]),
+            0xC000..=0xCFFF => None,
+            0xD000..=0xFFFF => Some(if self.lc_read_enable {
+                unsafe { *(core::ptr::addr_of!(crate::LC_RAM_16K) as *const u8).add(self.lc_index(addr)) }
+            } else {
+                self.rom[(addr - 0xD000) as usize]
+            }),
+        }
+    }
+
+    /// 監視器(F6)用的寫入。RAM 直接寫；$D000+ 不管 LC 寫保護，一律寫進目前的
+    /// Language Card bank。I/O 區拒絕（回傳 false），寫入永遠不會翻 soft switch。
+    pub fn poke(&mut self, addr: u16, data: u8) -> bool {
+        match addr {
+            0x0000..=0xBFFF => unsafe { *(core::ptr::addr_of_mut!(crate::RAM_48K) as *mut u8).add(addr as usize) = data; },
+            0xC000..=0xCFFF => return false,
+            0xD000..=0xFFFF => {
+                let i = self.lc_index(addr);
+                unsafe { *(core::ptr::addr_of_mut!(crate::LC_RAM_16K) as *mut u8).add(i) = data; }
+            }
+        }
+        true
+    }
 }
 
 impl Memory for Apple2Memory {

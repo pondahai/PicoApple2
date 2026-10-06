@@ -136,6 +136,8 @@ extern "C" {
   void apple2_audio_drop();
   uint32_t apple2_get_cycle_count();
   void apple2_get_cpu_state(uint16_t* pc, uint8_t* a, uint8_t* x, uint8_t* y, uint8_t* sp, uint8_t* status);
+  bool apple2_peek(uint16_t addr, uint8_t* out);
+  uint8_t apple2_poke(uint16_t addr, uint8_t data);
 }
 
 // ============ 音訊時間戳重放 (Cycle-accurate Speaker Replay) ============
@@ -352,6 +354,33 @@ void sdClaimForCore0() {
   while (g_repack_state != RP_IDLE) tight_loop_contents();
 }
 bool g_show_menu = false;
+// F6 記憶體監視器：開啟期間 Core 0 停跑模擬、Core 1 畫監視器。
+volatile bool g_show_memmon = false;
+// 監視器按鍵信箱：序列埠(Core 0)與鍵盤矩陣(Core 1)都往這裡丟，Core 1 消耗。
+// 碼值沿用 Apple II 的方向鍵 (0x0B/0x0A/0x08/0x15)，另補兩個換頁碼。
+#define MM_KEY_UP    0x0B
+#define MM_KEY_DOWN  0x0A
+#define MM_KEY_LEFT  0x08
+#define MM_KEY_RIGHT 0x15
+#define MM_KEY_PGUP  0x80
+#define MM_KEY_PGDN  0x81
+#define MM_KEY_QSIZE 16
+static volatile uint8_t g_mm_keys[MM_KEY_QSIZE];
+static volatile uint8_t g_mm_key_head = 0, g_mm_key_tail = 0;
+void mmPushKey(uint8_t k) {
+  if (k == 0) return;
+  uint32_t irq = spin_lock_blocking(fifo_lock);
+  uint8_t next = (g_mm_key_head + 1) % MM_KEY_QSIZE;
+  if (next != g_mm_key_tail) { g_mm_keys[g_mm_key_head] = k; g_mm_key_head = next; }   // 滿了就丟新鍵
+  spin_unlock(fifo_lock, irq);
+}
+static uint8_t mmPopKey() {
+  uint32_t irq = spin_lock_blocking(fifo_lock);
+  uint8_t k = 0;
+  if (g_mm_key_tail != g_mm_key_head) { k = g_mm_keys[g_mm_key_tail]; g_mm_key_tail = (g_mm_key_tail + 1) % MM_KEY_QSIZE; }
+  spin_unlock(fifo_lock, irq);
+  return k;
+}
 bool g_joy_mode = true;
 int g_last_m_on = -1;
 int g_last_drawn_track = -1;
@@ -716,6 +745,11 @@ void loop() {
         uint8_t type = proto_cmd[0]; uint8_t idx = proto_cmd[1]; uint8_t stat = proto_cmd[2]; bool b = (stat == 1);
         if (type == 'J') {
           if (b && g_show_menu) { if (idx == 0) g_menu_cmd = 1; else if (idx == 1) g_menu_cmd = 2; else if (idx == 4) g_menu_cmd = 3; else if (idx == 5) g_menu_cmd = 4; }
+          if (g_show_memmon) {   // 網頁端方向鍵/PgUp/PgDn 走 'J' 封包：監視器開著就拿來導覽，不碰搖桿
+            static const uint8_t jmap[6] = { MM_KEY_UP, MM_KEY_DOWN, MM_KEY_LEFT, MM_KEY_RIGHT, MM_KEY_PGUP, MM_KEY_PGDN };
+            if (b && idx < 6) mmPushKey(jmap[idx]);
+            proto_state = 0; continue;
+          }
           if (idx == 0) ser_joy_up = b; else if (idx == 1) ser_joy_down = b; else if (idx == 2) ser_joy_left = b; else if (idx == 3) ser_joy_right = b; else if (idx == 4) ser_joy_btn0 = b; else if (idx == 5) ser_joy_btn1 = b;
           if (!g_joy_mode && idx < 4 && b) {
             if (idx == 0) pushKey(0x0B); else if (idx == 1) pushKey(0x0A); else if (idx == 2) pushKey(0x08); else if (idx == 3) pushKey(0x15);     
@@ -729,12 +763,15 @@ void loop() {
             else if (idx == 114) g_f_key_event = 3;
             else if (idx == 115) g_f_key_event = 4;
             else if (idx == 116) g_f_key_event = 5;
+            else if (idx == 117) g_f_key_event = 6;
             else if (idx == 118) g_f_key_event = 7;
-            // F6 / F8~F12 無對應功能，吃掉不送
-          } else pushKey(idx);
+            // F8~F12 無對應功能，吃掉不送
+          } else if (g_show_memmon) mmPushKey(idx);
+          else pushKey(idx);
         } else if (type == 'P') {
           // 'P' = 貼上字元，進 FIFO 保序（網頁終端 simulateTyping 送出）
-          pushPasteKey(idx);
+          // 監視器開著時丟掉：否則會在恢復模擬後才憑空打進 Apple II。
+          if (!g_show_memmon) pushPasteKey(idx);
         }
         proto_state = 0;
       }
@@ -747,14 +784,21 @@ void loop() {
         static uint8_t last_raw_sk = 0;
         if (sK == 127 || sK == 8) sK = 0x08; else if (sK == '\r') sK = 0x0D; else if (sK == '\n') { if (last_raw_sk == '\r') { last_raw_sk = sK; continue; } sK = 0x0D; }
         else if (sK >= 'a' && sK <= 'z') sK -= 32; 
-        if (g_show_menu) { if (sK == 0x0D) g_menu_cmd = 3; else if (sK == 0x1B) g_menu_cmd = 4; } else { pushKey(sK); }
+        if (g_show_menu) { if (sK == 0x0D) g_menu_cmd = 3; else if (sK == 0x1B) g_menu_cmd = 4; } else if (g_show_memmon) { mmPushKey(sK); } else { pushKey(sK); }
         last_raw_sk = sK;
       }
-    } else if (esc_state == 1) { if (sK == '[' || sK == 'O') { esc_buf[esc_idx++] = sK; esc_state = 2; } else { if (g_show_menu) g_menu_cmd = 4; esc_state = 0; } }
+    } else if (esc_state == 1) { if (sK == '[' || sK == 'O') { esc_buf[esc_idx++] = sK; esc_state = 2; } else { if (g_show_menu) g_menu_cmd = 4; else if (g_show_memmon) mmPushKey(0x1B); esc_state = 0; } }
     else if (esc_state == 2) {
       if (esc_idx < 7) { esc_buf[esc_idx++] = sK; esc_buf[esc_idx] = 0; }
       if ((sK >= 'A' && sK <= 'Z') || sK == '~') {
-        if (esc_buf[0] == '[') {
+        if (esc_buf[0] == '[' && g_show_memmon) {
+          // 監視器開著：方向鍵/PgUp/PgDn 拿來導覽；F6 照常走信箱(關閉監視器)
+          if (sK == 'A') mmPushKey(MM_KEY_UP); else if (sK == 'B') mmPushKey(MM_KEY_DOWN);
+          else if (sK == 'C') mmPushKey(MM_KEY_RIGHT); else if (sK == 'D') mmPushKey(MM_KEY_LEFT);
+          else if (strcmp(esc_buf, "[5~") == 0) mmPushKey(MM_KEY_PGUP);
+          else if (strcmp(esc_buf, "[6~") == 0) mmPushKey(MM_KEY_PGDN);
+          else if (strcmp(esc_buf, "[17~") == 0) g_f_key_event = 6;
+        } else if (esc_buf[0] == '[') {
           if (sK == 'A') { if (g_show_menu) g_menu_cmd = 1; else if (!g_joy_mode) pushKey(0x0B); else { ser_joy_up = true; last_ansi_joy_t = millis(); } }
           else if (sK == 'B') { if (g_show_menu) g_menu_cmd = 2; else if (!g_joy_mode) pushKey(0x0A); else { ser_joy_down = true; last_ansi_joy_t = millis(); } }
           else if (sK == 'C') { if (!g_show_menu) { if (!g_joy_mode) pushKey(0x15); else { ser_joy_right = true; last_ansi_joy_t = millis(); } } }
@@ -766,8 +810,8 @@ void loop() {
           else if (strcmp(esc_buf, "[13~") == 0 || strcmp(esc_buf, "OR") == 0) g_f_key_event = 3;
           else if (strcmp(esc_buf, "[14~") == 0 || strcmp(esc_buf, "OS") == 0) g_f_key_event = 4;
           else if (strcmp(esc_buf, "[15~") == 0) g_f_key_event = 5;
+          else if (strcmp(esc_buf, "[17~") == 0) g_f_key_event = 6;   // F6：記憶體監視器（內部是 Fn+6）
           else if (strcmp(esc_buf, "[18~") == 0) g_f_key_event = 7;   // F7：彩色/綠螢幕（內部是 Fn+7）
-          // 註：F6 (`[17~`) 沒有對應功能，留空不接 —— 底部速查列上也沒有 F6。
         } else if (esc_buf[0] == 'O') {
           // VT100 式 SS3 序列：ESC O P/Q/R/S = F1~F4。
           // （上面 '[' 分支裡那兩個 strcmp(esc_buf,"OP"/"OS") 永遠不會成立 ——
@@ -828,7 +872,9 @@ void loop() {
   }
   if (req_reload_track0) { req_reload_track0 = false; loadSingleTrack(0); }
 
-  if (g_emu_paused && !g_show_menu) { yield(); return; }
+  // 監視器另用自己的旗標暫停：loadSingleTrack() 會把 g_emu_paused 清回 false（熱插拔時），
+  // 不能讓它在監視器開著時把模擬偷偷放行。
+  if ((g_emu_paused || g_show_memmon) && !g_show_menu) { yield(); return; }
   if (g_show_menu) return;
 
   g_c0_checkpoint = 3; 
@@ -933,6 +979,7 @@ static void paintStatusLines() {
 // 沿用原本的名字，所以每個「狀態變動後重畫」的既有呼叫點都自動變成一次觸發
 // —— 包含 F4/F5/Fn+7 切換、以及離開選單後的重畫。
 void updateStatusLine() {
+  if (g_show_memmon) { g_status_visible = false; return; }   // 監視器佔滿整頁，不畫說明列
   g_status_show_t = millis();
   g_status_visible = true;
   paintStatusLines();
@@ -941,7 +988,7 @@ void updateStatusLine() {
 // 倒數到期就把兩列擦掉。由 Core 1 的 VBLANK 每幀呼叫一次。
 // 選單開啟時不動手：選單畫面自己佔滿整頁(下緣外框就在 y=228)，擦了會破洞。
 void statusLineTick() {
-  if (g_show_menu) { g_status_visible = false; return; }   // 選單的 fillScreen 已經清乾淨了
+  if (g_show_menu || g_show_memmon) { g_status_visible = false; return; }   // 選單/監視器的 fillScreen 已經清乾淨了
   if (!g_status_visible) return;
   if (millis() - g_status_show_t <= STATUS_SHOW_MS) return;
   g_status_visible = false;
@@ -1043,6 +1090,214 @@ void setup1() {
   g_boot_ready = true;
 }
 
+// ============ F6 記憶體監視器 (移植自 apple2emu 的 mem_view) ============
+// 320x240 用 7x8 Apple 字型只有 45 欄 x 30 列，放不下桌面版一列 16 bytes，
+// 改成一列 8 bytes：「0300: A9 00 8D 30 C0 4C 00 03  )..0.L..」共 39 欄。
+// 讀寫走 apple2_peek/poke，瀏覽不會翻 soft switch；$D000+ 寫進目前的 LC bank。
+// 畫面以「字元格影子緩衝」差分重繪：只送有變的格子，移游標只要幾 ms，
+// 不必每次 fillScreen(~100ms)。
+#define MM_COLS 45
+#define MM_ROWS 30
+#define MM_X0 2                    // 45 欄 x 7px = 315px，左右各留約 2px
+#define MM_DATA_ROW0 2             // 第 0 列標題、第 1 列空白
+#define MM_DATA_ROWS 24
+#define MM_PAGE (MM_DATA_ROWS * 8) // 一頁 192 bytes
+#define MM_TOP_MAX (0x10000 - MM_PAGE)
+#define MM_STATUS_ROW 27
+#define MM_HELP_ROW 28
+#define MM_ADDR_COL 3
+#define MM_HEX_COL 9
+#define MM_ASCII_COL 34
+#define MM_C_GREEN 0x07E0
+#define MM_C_WHITE 0xFFFF
+#define MM_C_CYAN  0x07FF
+#define MM_C_DIM   0x8410
+#define MM_C_YEL   0xFFE0
+#define MM_C_RED   0xF800
+
+static char     mm_sh_ch[MM_ROWS][MM_COLS];
+static uint16_t mm_sh_fg[MM_ROWS][MM_COLS], mm_sh_bg[MM_ROWS][MM_COLS];
+static uint32_t mm_cursor = 0, mm_top = 0;
+static bool mm_editing = false, mm_low_nibble = false;
+static bool mm_goto_active = false; static char mm_goto[5]; static uint8_t mm_goto_len = 0;
+static char mm_msg[MM_COLS + 1]; static bool mm_msg_err = false;
+
+// 影子緩衝對應「剛 fillScreen(0) 完的黑畫面」
+static void mmShadowReset() {
+  for (int r = 0; r < MM_ROWS; r++) for (int c = 0; c < MM_COLS; c++) { mm_sh_ch[r][c] = ' '; mm_sh_fg[r][c] = 0; mm_sh_bg[r][c] = 0; }
+}
+
+static void mmPut(int row, int col, char ch, uint16_t fg, uint16_t bg) {
+  if (row < 0 || row >= MM_ROWS || col < 0 || col >= MM_COLS) return;
+  if (ch >= 'a' && ch <= 'z') ch -= 32;
+  if (ch == ' ') fg = bg;          // 空白只看底色，免得換前景色就白白重畫
+  if (mm_sh_ch[row][col] == ch && mm_sh_fg[row][col] == fg && mm_sh_bg[row][col] == bg) return;
+  mm_sh_ch[row][col] = ch; mm_sh_fg[row][col] = fg; mm_sh_bg[row][col] = bg;
+  tft_dma.drawChar(MM_X0 + col * 7, row * 8, ch, fg, bg, apple2_get_char_rom_ptr());
+}
+
+// 從 col 起寫字串，並把該列其餘到 end_col(不含) 補空白
+static void mmText(int row, int col, const char* s, uint16_t fg, uint16_t bg, int end_col = MM_COLS) {
+  for (; *s && col < end_col; s++, col++) mmPut(row, col, *s, fg, bg);
+  for (; col < end_col; col++) mmPut(row, col, ' ', fg, bg);
+}
+
+static bool mmPeek(uint16_t addr, uint8_t* v) {
+  uint32_t irq = spin_lock_blocking(res_lock);
+  bool ok = apple2_peek(addr, v);
+  spin_unlock(res_lock, irq);
+  return ok;
+}
+
+static void mmJump(uint16_t addr) {
+  mm_cursor = addr; mm_low_nibble = false;
+  mm_top = mm_cursor & ~7u; if (mm_top > MM_TOP_MAX) mm_top = MM_TOP_MAX;
+}
+
+static void mmScrollToCursor() {
+  uint32_t row_start = mm_cursor & ~7u;
+  if (row_start < mm_top) mm_top = row_start;
+  else if (row_start >= mm_top + MM_PAGE) mm_top = row_start + 8 - MM_PAGE;
+  if (mm_top > MM_TOP_MAX) mm_top = MM_TOP_MAX;
+}
+
+static void mmMove(int32_t delta) {
+  int32_t c = (int32_t)mm_cursor + delta;
+  mm_cursor = c < 0 ? 0 : (c > 0xFFFF ? 0xFFFF : c);
+  mm_low_nibble = false;
+  mmScrollToCursor();
+}
+
+static void mmPage(int dir) {
+  int32_t t = (int32_t)mm_top + dir * MM_PAGE;
+  mm_top = t < 0 ? 0 : (t > MM_TOP_MAX ? MM_TOP_MAX : t);
+  mmMove(dir * MM_PAGE);
+}
+
+static int mmHexDigit(uint8_t k) {
+  if (k >= '0' && k <= '9') return k - '0';
+  if (k >= 'A' && k <= 'F') return k - 'A' + 10;
+  if (k >= 'a' && k <= 'f') return k - 'a' + 10;
+  return -1;
+}
+
+static void mmEdit(uint8_t digit) {
+  uint16_t addr = (uint16_t)mm_cursor; uint8_t old;
+  if (!mmPeek(addr, &old)) { snprintf(mm_msg, sizeof(mm_msg), "$%04X IS I/O SPACE - NOT EDITABLE", addr); mm_msg_err = true; return; }
+  uint8_t nv = mm_low_nibble ? (uint8_t)((old & 0xF0) | digit) : (uint8_t)((digit << 4) | (old & 0x0F));
+  uint32_t irq = spin_lock_blocking(res_lock);
+  uint8_t r = apple2_poke(addr, nv);
+  spin_unlock(res_lock, irq);
+  if (r == 0) { snprintf(mm_msg, sizeof(mm_msg), "$%04X IS I/O SPACE - NOT EDITABLE", addr); mm_msg_err = true; return; }
+  if (r == 2) { strcpy(mm_msg, "WROTE LC RAM - HIDDEN WHILE ROM READ"); mm_msg_err = false; }
+  if (mm_low_nibble) mmMove(1); else mm_low_nibble = true;
+}
+
+static void mmRender() {
+  char buf[MM_COLS + 1];
+  mmText(0, 0, " APPLE II MEMORY MONITOR  (EMULATION PAUSED)", 0x0000, MM_C_GREEN);
+
+  for (int r = 0; r < MM_DATA_ROWS; r++) {
+    int row = MM_DATA_ROW0 + r;
+    uint32_t base = mm_top + r * 8;
+    snprintf(buf, sizeof(buf), "%04X:", (unsigned)base);
+    mmText(row, MM_ADDR_COL, buf, MM_C_GREEN, 0x0000, MM_HEX_COL);
+    for (int i = 0; i < 8; i++) {
+      uint16_t a = (uint16_t)(base + i); uint8_t v = 0;
+      bool known = mmPeek(a, &v);
+      bool cur = (a == mm_cursor);
+      uint16_t hfg = known ? MM_C_WHITE : MM_C_DIM;
+      int hc = MM_HEX_COL + i * 3;
+      char h0 = '-', h1 = '-';
+      if (known) { h0 = "0123456789ABCDEF"[v >> 4]; h1 = "0123456789ABCDEF"[v & 0x0F]; }
+      if (cur && !mm_editing) {                       // 檢視模式：整格反白
+        mmPut(row, hc, h0, 0x0000, MM_C_WHITE); mmPut(row, hc + 1, h1, 0x0000, MM_C_WHITE);
+      } else if (cur) {                               // 編輯模式：黃底標出下一個要寫的半位元組
+        mmPut(row, hc,     h0, mm_low_nibble ? MM_C_YEL : 0x0000, mm_low_nibble ? 0x0000 : MM_C_YEL);
+        mmPut(row, hc + 1, h1, mm_low_nibble ? 0x0000 : MM_C_YEL, mm_low_nibble ? MM_C_YEL : 0x0000);
+      } else {
+        mmPut(row, hc, h0, hfg, 0x0000); mmPut(row, hc + 1, h1, hfg, 0x0000);
+      }
+      mmPut(row, hc + 2, ' ', 0, 0);
+      uint8_t c7 = v & 0x7F;
+      char ac = !known ? ' ' : ((c7 >= 0x20 && c7 < 0x7F) ? (char)c7 : '.');
+      mmPut(row, MM_ASCII_COL + i, ac, cur ? 0x0000 : MM_C_CYAN, cur ? MM_C_CYAN : 0x0000);
+    }
+  }
+
+  // 狀態列：GOTO 輸入 > 訊息 > 游標位元組資訊
+  if (mm_goto_active) {
+    snprintf(buf, sizeof(buf), "GOTO $%s_", mm_goto);
+    mmText(MM_STATUS_ROW, 1, buf, MM_C_YEL, 0x0000);
+  } else if (mm_msg[0]) {
+    mmText(MM_STATUS_ROW, 1, mm_msg, mm_msg_err ? MM_C_RED : MM_C_YEL, 0x0000);
+  } else {
+    uint8_t v;
+    if (mmPeek((uint16_t)mm_cursor, &v)) {
+      char bin[9]; for (int b = 0; b < 8; b++) bin[b] = (v & (0x80 >> b)) ? '1' : '0'; bin[8] = 0;
+      snprintf(buf, sizeof(buf), "$%04X = $%02X  %3u  %%%s", (unsigned)mm_cursor, v, v, bin);
+    } else {
+      snprintf(buf, sizeof(buf), "$%04X = I/O (NO STATIC VALUE)", (unsigned)mm_cursor);
+    }
+    mmText(MM_STATUS_ROW, 1, buf, MM_C_WHITE, 0x0000);
+  }
+
+  if (mm_editing) {
+    mmText(MM_HELP_ROW,     1, "EDIT: 0-F WRITE BYTE   ARROWS MOVE", 0x0000, MM_C_YEL, MM_COLS - 1);
+    mmText(MM_HELP_ROW + 1, 1, "ENTER/ESC BACK TO VIEW",             0x0000, MM_C_YEL, MM_COLS - 1);
+  } else {
+    mmText(MM_HELP_ROW,     1, "ARROWS MOVE  SHIFT+UP/DN PAGE  G GOTO", MM_C_GREEN, 0x0000, MM_COLS - 1);
+    mmText(MM_HELP_ROW + 1, 1, "ENTER EDIT   ESC/F6 RESUME",             MM_C_GREEN, 0x0000, MM_COLS - 1);
+  }
+}
+
+// 開啟：Core 0 看到 g_show_memmon 就停在下一個批次邊界（見 loop()）。
+static void mmOpen() {
+  g_show_memmon = true;
+  { uint32_t irq = spin_lock_blocking(fifo_lock); g_mm_key_head = g_mm_key_tail = 0; spin_unlock(fifo_lock, irq); }
+  mm_editing = false; mm_low_nibble = false; mm_goto_active = false; mm_msg[0] = 0;
+  static bool first = true;
+  if (first) { first = false; mmJump(0x0000); }   // 之後重開沿用上次位置
+  tft_dma.waitTransferDone();   // 排空模擬畫面的 scanline DMA（見 SPI DMA drain 教訓）
+  gpio_put(PIN_DISPLAY_CS, 1);
+  tft_dma.fillScreen(0x0000);
+  mmShadowReset();
+  mmRender();
+}
+
+// 關閉：音訊錨點由 audioPump() 偵測到大幅漂移時自動重新校準，不需在此處理。
+static void mmClose() {
+  g_show_memmon = false;
+  tft_dma.fillScreen(0); g_last_m_on = -1; g_last_drawn_track = -1; updateStatusLine();
+}
+
+// Core 1 在監視器開著時每圈呼叫：消耗按鍵、有變才重繪
+static void mmService() {
+  bool changed = false;
+  for (uint8_t k; g_show_memmon && (k = mmPopKey()) != 0; ) {
+    changed = true;
+    if (mm_goto_active) {
+      if (k == 0x1B) mm_goto_active = false;
+      else if (k == MM_KEY_LEFT || k == 0x7F) { if (mm_goto_len) mm_goto[--mm_goto_len] = 0; }   // Backspace 與左鍵同碼
+      else if (k == 0x0D) { if (mm_goto_len) mmJump((uint16_t)strtoul(mm_goto, nullptr, 16)); mm_goto_active = false; }
+      else { int d = mmHexDigit(k); if (d >= 0 && mm_goto_len < 4) { mm_goto[mm_goto_len++] = "0123456789ABCDEF"[d]; mm_goto[mm_goto_len] = 0; } }
+      continue;
+    }
+    mm_msg[0] = 0;
+    if (k == 0x1B) { if (mm_editing) { mm_editing = false; mm_low_nibble = false; } else { mmClose(); return; } }
+    else if (k == 0x0D) { mm_editing = !mm_editing; mm_low_nibble = false; }
+    else if (k == MM_KEY_UP) mmMove(-8);
+    else if (k == MM_KEY_DOWN) mmMove(8);
+    else if (k == MM_KEY_LEFT) mmMove(-1);
+    else if (k == MM_KEY_RIGHT) mmMove(1);
+    else if (k == MM_KEY_PGUP) mmPage(-1);
+    else if (k == MM_KEY_PGDN) mmPage(1);
+    else if (mm_editing) { int d = mmHexDigit(k); if (d >= 0) mmEdit((uint8_t)d); }
+    else if (k == 'G' || k == 'g') { mm_goto_active = true; mm_goto_len = 0; mm_goto[0] = 0; }
+  }
+  if (changed && g_show_memmon) mmRender();
+}
+
 void scan_matrix() {
   static bool last_menu_p = false; bool menu_p = (digitalRead(BTN_MENU) == LOW);
   if (menu_p && !last_menu_p) { g_f_key_event = 3; } last_menu_p = menu_p;
@@ -1058,10 +1313,12 @@ void scan_matrix() {
   bool mat_joy_up = false, mat_joy_down = false, mat_joy_left = false, mat_joy_right = false, mat_joy_btn0 = false, mat_joy_btn1 = false;
   for (int r = 0; r < 8; r++) { for (int c = 0; c < 8; c++) { if (keyState[r][c]) { uint8_t k = keymap_base[r][c]; if (k == 209) mat_joy_up = true; if (k == 210) mat_joy_down = true; if (k == 211) mat_joy_left = true; if (k == 212) mat_joy_right = true; if (k == 213) mat_joy_btn0 = true; if (k == 214) mat_joy_btn1 = true; } } }
   
-  bool raw_up = (digitalRead(BTN_UP) == LOW) || ((g_joy_mode || g_show_menu) && mat_joy_up);
-  bool raw_down = (digitalRead(BTN_DOWN) == LOW) || ((g_joy_mode || g_show_menu) && mat_joy_down);
-  bool raw_left = (digitalRead(BTN_LEFT) == LOW) || ((g_joy_mode || g_show_menu) && mat_joy_left);
-  bool raw_right = (digitalRead(BTN_RIGHT) == LOW) || ((g_joy_mode || g_show_menu) && mat_joy_right);
+  // 選單/監視器開著時，鍵盤上的方向鍵一律當導覽用（不論搖桿/鍵盤模式）
+  bool nav = g_joy_mode || g_show_menu || g_show_memmon;
+  bool raw_up = (digitalRead(BTN_UP) == LOW) || (nav && mat_joy_up);
+  bool raw_down = (digitalRead(BTN_DOWN) == LOW) || (nav && mat_joy_down);
+  bool raw_left = (digitalRead(BTN_LEFT) == LOW) || (nav && mat_joy_left);
+  bool raw_right = (digitalRead(BTN_RIGHT) == LOW) || (nav && mat_joy_right);
   bool raw_b0 = (digitalRead(BTN_A) == LOW) || mat_joy_btn0;
   bool raw_b1 = (digitalRead(BTN_B) == LOW) || mat_joy_btn1;
   bool raw_alt = (digitalRead(BTN_ALT) == LOW);
@@ -1076,6 +1333,17 @@ void scan_matrix() {
   bool up_clicked    = raw_up    && !last_raw_up;
   last_raw_b0 = raw_b0; last_raw_b1 = raw_b1; last_raw_right = raw_right; last_raw_down = raw_down; last_raw_left = raw_left; last_raw_up = raw_up;
 
+  if (g_show_memmon) {
+    // 監視器導覽：方向=移動，ALT 或 Shift + 上/下=換頁，A=ENTER(切換編輯)，B=ESC
+    bool page_mod = raw_alt || keyState[3][5];
+    if (up_clicked)    mmPushKey(page_mod ? MM_KEY_PGUP : MM_KEY_UP);
+    if (down_clicked)  mmPushKey(page_mod ? MM_KEY_PGDN : MM_KEY_DOWN);
+    if (left_clicked)  mmPushKey(MM_KEY_LEFT);
+    if (right_clicked) mmPushKey(MM_KEY_RIGHT);
+    if (b0_clicked && !raw_alt) mmPushKey(0x0D);
+    if (b1_clicked && !raw_alt) mmPushKey(0x1B);
+  }
+
   if (raw_alt) {
     if (b1_clicked) { // BTN_ALT + BTN_B -> Toggle ARROWS mode
       g_joy_mode = !g_joy_mode;
@@ -1086,10 +1354,11 @@ void scan_matrix() {
       updateStatusLine();
     }
     // BTN_ALT + RIGHT -> ENTER (0x0D)，+ DOWN -> SPACE (0x20)，+ LEFT -> 'J'，+ UP -> 'K'；選單中不送，避免殘留按鍵
-    if (right_clicked && !g_show_menu) pushHardwareKey(0x0D);
-    if (down_clicked  && !g_show_menu) pushHardwareKey(0x20);
-    if (left_clicked  && !g_show_menu) pushHardwareKey('J');
-    if (up_clicked    && !g_show_menu) pushHardwareKey('K');
+    bool overlay = g_show_menu || g_show_memmon;
+    if (right_clicked && !overlay) pushHardwareKey(0x0D);
+    if (down_clicked  && !overlay) pushHardwareKey(0x20);
+    if (left_clicked  && !overlay) pushHardwareKey('J');
+    if (up_clicked    && !overlay) pushHardwareKey('K');
     // Suppress regular buttons/directions when ALT is held
     raw_b0 = false;
     raw_b1 = false;
@@ -1126,19 +1395,20 @@ void scan_matrix() {
             // 其餘一樣吃掉不送鍵 —— 否則 Fn+6 會漏出一個 '6' 給模擬器。
             // 判斷用不帶 Shift 的 keymap_base，省掉一整串 '2'/'@' 的成對比對。
             uint8_t kb = keymap_base[r][c];
-            if (kb >= '1' && kb <= '5') g_f_key_event = kb - '0';
+            if (kb >= '1' && kb <= '6') g_f_key_event = kb - '0';
             else if (kb == 'c') { g_caps_lock = !g_caps_lock; updateStatusLine(); }   // Fn+C
             // Fn+7 = 彩色 / 綠色監視器切換。純翻旗標，不佔用 g_f_key_event
             // （那條路是給 reset/選單這種重動作走的），矩陣掃描本身已是邊緣觸發。
             else if (kb == '7') { g_mono_green = !g_mono_green; updateStatusLine(); }
           }
           else {
-            if (k >= 209 && k <= 214) { if (!g_joy_mode && k <= 212) { if (k == 209) k = 0x0B; else if (k == 210) k = 0x0A; else if (k == 211) k = 0x08; else if (k == 212) k = 0x15; } else k = 0; } else if (k == 203) k = 0x0D; else if (k == 207) k = 0x1B; else if (k == 204) k = 0x08;
+            if (g_show_memmon && k >= 209 && k <= 214) k = 0;   // 監視器：方向鍵已由上面的導覽路徑處理
+            else if (k >= 209 && k <= 214) { if (!g_joy_mode && k <= 212) { if (k == 209) k = 0x0B; else if (k == 210) k = 0x0A; else if (k == 211) k = 0x08; else if (k == 212) k = 0x15; } else k = 0; } else if (k == 203) k = 0x0D; else if (k == 207) k = 0x1B; else if (k == 204) k = 0x08;
             else if (k == 206) k = 0x09;                       // Tab
             else if (k == 208) { g_caps_lock = !g_caps_lock; k = 0; } // CapsLock 鍵
             else if (isCtrlPressed) { if (k >= 'a' && k <= 'z') k = (k - 32) & 0x1F; else if (k >= '@' && k <= '_') k = k & 0x1F; else k = 0; }
             else { if (g_caps_lock && !isShiftPressed && k >= 'a' && k <= 'z') k -= 32; else if (g_caps_lock && isShiftPressed && k >= 'A' && k <= 'Z') k += 32; }
-            if (k > 0) { if (!g_show_menu) pushHardwareKey(k); else { if (k == 0x0D) g_menu_cmd = 3; else if (k == 0x1B) g_menu_cmd = 4; } }
+            if (k > 0) { if (g_show_memmon) mmPushKey(k); else if (!g_show_menu) pushHardwareKey(k); else { if (k == 0x0D) g_menu_cmd = 3; else if (k == 0x1B) g_menu_cmd = 4; } }
           }
         }
       }
@@ -1151,7 +1421,10 @@ void scan_matrix() {
           // 任一 F 鍵動作都算一次觸發：內部是在 Fn 已點亮後把倒數蓋掉重算，
           // 外接鍵盤沒有 Fn，就靠這裡讓說明列現身(F1~F5 走同一個信箱)。
           updateStatusLine();
-          if (g_f_key_event == 1) { uint32_t irq = spin_lock_blocking(res_lock); apple2_warm_reset(); spin_unlock(res_lock, irq); }
+          // 監視器開著時只認 F6(關閉)：reset/選單/切換類動作一律擋掉，免得在暫停中改機器狀態
+          if (g_show_memmon) { if (g_f_key_event == 6) mmClose(); }
+          else if (g_f_key_event == 6) { if (!g_show_menu) mmOpen(); }
+          else if (g_f_key_event == 1) { uint32_t irq = spin_lock_blocking(res_lock); apple2_warm_reset(); spin_unlock(res_lock, irq); }
           else if (g_f_key_event == 2) { uint32_t irq = spin_lock_blocking(res_lock); apple2_reset(); spin_unlock(res_lock, irq); req_reload_track0 = true; }
           else if (g_f_key_event == 3) { if (!g_show_menu) { g_emu_paused = true; req_scan_disks = true; ack_scan_disks = false; g_show_menu = true;
               tft_dma.waitTransferDone();   // 排空前一張畫面的 scanline DMA，避免進選單瞬間殘像(花屏)
@@ -1189,6 +1462,14 @@ void loop1() {
     last_monitor_t = now;
   }
 
+  if (g_show_memmon) {
+    // 模擬已停：不追光柵，只掃鍵盤、處理監視器按鍵。限速到 ~200Hz，
+    // 免得空轉狂打 shiftOut（矩陣本身有 30ms 去彈跳，這個頻率綽綽有餘）。
+    static uint32_t last_mm_scan = 0;
+    if (now - last_mm_scan >= 5) { last_mm_scan = now; scan_matrix(); }
+    if (g_show_memmon) mmService();
+    return;
+  }
   if (g_show_menu) {
     scan_matrix();
     if (req_scan_disks) { if (ack_scan_disks) { req_scan_disks = false;
@@ -1282,7 +1563,8 @@ void loop1() {
       statusLineTick();      // 說明列倒數：與 scan_matrix 同在 VBLANK，SPI 匯流排此刻是靜的
       // scan_matrix() 可能在此剛把 g_show_menu 設為 true 並畫好「LOADING MENU」畫面；
       // 若不在此中止，下方的模擬掃描線繪製會立刻把選單畫面覆蓋掉 → 進選單前一閃花屏。
-      if (g_show_menu) return;
+      // 監視器(F6)同理。
+      if (g_show_menu || g_show_memmon) return;
   }
 
   while (next_draw_y <= cpu_y && next_draw_y < 192) {

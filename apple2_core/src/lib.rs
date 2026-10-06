@@ -14,6 +14,8 @@ pub mod cpu;
 mod boot_test;
 #[cfg(test)]
 mod floating_bus_test;
+#[cfg(test)]
+mod peek_poke_test;
 pub mod disk2;
 pub mod instructions;
 pub mod machine;
@@ -286,6 +288,30 @@ pub extern "C" fn apple2_get_cpu_state(out_pc: *mut u16, out_a: *mut u8, out_x: 
             *out_sp = m.cpu.sp;
             *out_status = m.cpu.status.to_byte();
         }
+    }
+}
+
+/// 監視器(F6)讀取：不翻 soft switch。I/O 區無固定值時回傳 false。
+#[unsafe(no_mangle)]
+pub extern "C" fn apple2_peek(addr: u16, out: *mut u8) -> bool {
+    unsafe {
+        if let Some(ref m) = *addr_of_mut!(MACHINE) {
+            if let Some(v) = m.mem.peek(addr) { *out = v; return true; }
+        }
+        false
+    }
+}
+
+/// 監視器(F6)寫入。回傳 0 = I/O 區不可寫、1 = 已寫入、
+/// 2 = 已寫入 LC RAM 但目前讀的是 ROM（畫面上看不到剛寫的值）。
+#[unsafe(no_mangle)]
+pub extern "C" fn apple2_poke(addr: u16, data: u8) -> u8 {
+    unsafe {
+        if let Some(ref mut m) = *addr_of_mut!(MACHINE) {
+            if !m.mem.poke(addr, data) { return 0; }
+            return if addr >= 0xD000 && !m.mem.lc_read_enable { 2 } else { 1 };
+        }
+        0
     }
 }
 
