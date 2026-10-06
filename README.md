@@ -114,8 +114,10 @@
     [rp2040-retro-loader](https://github.com/pondahai/rp2040-retro-loader)，或直接拖進 `RPI-RP2`、
     或 `picotool load -v -x` 用 USB 燒。兩種路徑吃同一個檔。
 
-    > ⚠️ 同目錄下的 `build_offset\PicoApple2.ino.uf2` **不能單獨燒**——那是前 16KB 空白的純
-    > body，而且跟正常版**檔名一樣**。只認 `_standalone` 這個字尾。
+    > ⚠️ **USB 燒 standalone 會蓋掉 loader**：它前 16KB 是跳板，與 loader 同位址。
+    > 板上已裝 loader 時，USB 只燒同目錄的 `build_offset\PicoApple2.ino.uf2`（純 body，只寫 `0x10004000` 以後），
+    > 再 `picotool reboot`。這個 body 檔在**沒有 loader/跳板的板子上不能單獨燒**（前 16KB 空白），
+    > 而且跟 `full_build` 的產出**檔名一樣**，別拿錯。
 
 *   **不搭配載入器時** (`full_build.bat`):
     link 在 `0x10000000` 的傳統流程，最後會自動 1200bps 重置並上傳，產出 `build\PicoApple2.ino.uf2`。
@@ -262,7 +264,13 @@ picotool load -v -x build_offset\PicoApple2_standalone.uf2
 
 *   `-v` 會逐塊驗證。開發時建議用它而不是拖曳——位址不連續的 UF2 拖曳會安靜截斷（loader README §3.5 坑 3；`merge_uf2.py` 已經用 `0xFF` 補過空隙，但 `-v` 仍然比較好查）。
 *   `picotool load -x` 與 `picotool reboot` 都是**軟重置**，載入器會直接穿透到 app、不顯示選單。要看選單就燒完不加 `-x`，然後**拔電冷開機**。
-*   `build_offset\PicoApple2.ino.uf2`（沒有 `_standalone`）是只有本體的版本，前 16KB 是空的，**不能單獨燒錄**。
+*   **板上已有 loader 時別用上面那行**：standalone 的跳板會把 loader 蓋掉。改燒純 body、保留 loader：
+    ```bash
+    picotool load -v build_offset\PicoApple2.ino.uf2
+    picotool reboot
+    ```
+    （body 檔開頭是空的，`load -x` 會報「不是有效映像」，所以分兩步。）loader 被蓋掉了就先 `picotool load -v ..\rp2040-retro-loader\build\loader.uf2` 燒回去。
+*   `build_offset\PicoApple2.ino.uf2`（沒有 `_standalone`）是只有本體的版本，前 16KB 是空的，**沒有 loader 的板子不能單獨燒錄**。
 
 ---
 
@@ -307,14 +315,16 @@ picotool load -v -x build_offset\PicoApple2_standalone.uf2
 | **CapsLock** | — | `Fn + C` | 切換大寫鎖定 |
 | **螢幕顏色** | `F7` | `Fn + 7` | 切換 彩色 / 綠色監視器 (P1 磷光模擬，TEXT/HIRES/LORES 全模式套用) |
 
-> **底部說明列**：螢幕下方兩列（狀態列 + F Key 速查列）平時是隱藏的，遊戲畫面下方保持全黑。
+> **底部說明列**：螢幕下方三列（狀態列 + 兩列 F Key 速查）平時是隱藏的，遊戲畫面下方保持全黑。
 > 按下實體 **Fn** 鍵的瞬間、或任一 **F 鍵**動作發生時會亮起，**3 秒**後自動隱藏；
 > 期間再按會把倒數重新計時。實體鍵盤上是「按住 Fn 看一眼再選數字」，
 > 終端機沒有 Fn 鍵，則是按下 F 鍵後才顯示（等於一併確認切換結果）。開機時也會先亮 3 秒。
 >
-> F Key 速查列內容（一列 44 字的縮寫，對應上表）：
-> `F1:WRST  F2:CRST  F3:DISK  F4:JOY  F5:SPD  F7:GRN`
-> （速查列已滿 44 字，**F6 未列入**。）
+> 版面為等距三列（y=206 / 218 / 230）：第一列狀態，下面兩列 F Key 速查（4 欄 x 11 字對齊，對應上表）：
+> ```
+> F1:WRST    F2:CRST    F3:DISK    F4:JOY
+> F5:SPD     F6:MEM     F7:GRN
+> ```
 
 ### 3. 實體按鈕組合鍵 (ALT Combos)
 按住 `ALT` (GPIO 28) 再點按下列鍵（皆為邊緣偵測，按一下觸發一次；ALT 按住期間該鍵的原功能會被抑制）：

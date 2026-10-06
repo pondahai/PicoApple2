@@ -22,7 +22,13 @@
 *   **按鍵路由**：序列埠(Core 0)與矩陣(Core 1)都丟進監視器專用的小佇列（`fifo_lock` 保護），Core 1 消耗。
     F6 入口：ANSI `ESC [17~`、'K' 封包 keyCode 117、Fn+6；網頁 F6 改送 `[17~`（**兩端一起改**）。
 *   **恢復**：音訊錨點由 `audioPump()` 偵測大幅漂移自動重校，與關選單同路徑，實機 beep 音高正常。
-*   **未做**：底部速查列已滿 44 字，沒有放 F6。
+*   **底部說明列改三列（同日，實機驗證通過 ✅）**：原單列 44 字已滿放不下 F6，改成等距三列
+    y=206 狀態 / y=218 `F1:WRST F2:CRST F3:DISK F4:JOY` / y=230 `F5:SPD F6:MEM F7:GRN`，
+    速查以 4 欄 x 11 字對齊（`FKeyHint` 加 `row` 欄位）。上緣不能再往上 —— 磁碟馬達燈在 (305,196) 佔 y=196..203。
+    清除區改為 `drawRect(0,204,320,36)` 約 3ms，仍塞得進 VBLANK。
+*   **⚠️ 燒錄別蓋掉 loader**：USB 燒 `_standalone.uf2` 會用跳板覆蓋 flash 前 16KB 的 rp2040-retro-loader。
+    板上已有 loader 時，USB 只燒 `build_offset\PicoApple2.ino.uf2`（只寫 0x10004000 以後），
+    燒完用 `picotool reboot`（該檔開頭是空的，`load -x` 會報「不是有效映像」）；standalone 版只放 SD 卡讓 loader 燒。
 
 ## 2026-09-14: 底部說明列改為按鍵喚出 3 秒自動隱藏 + 網頁補 F7（實機驗證通過 ✅）
 

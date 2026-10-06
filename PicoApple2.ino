@@ -93,7 +93,7 @@ float g_speed_multipliers[] = {1.0f, 1.2f, 1.4f, 1.5f};
 volatile int g_speed_idx = 0;
 volatile uint8_t g_f_key_event = 0;
 volatile bool g_emu_paused = false;
-// 底部兩列說明的顯示狀態：平時隱藏，按下 Fn 或任一 F 鍵動作時亮 3 秒。
+// 底部三列說明的顯示狀態：平時隱藏，按下 Fn 或任一 F 鍵動作時亮 3 秒。
 // 觸發(updateStatusLine)發生在 Core 1 的 VBLANK 段與開機的 setup()，
 // 自動隱藏的判斷(statusLineTick)同樣掛在 VBLANK，兩者不會同時碰 SPI。
 volatile bool g_status_visible = false;
@@ -929,32 +929,36 @@ void drawString(uint16_t x, uint16_t y, String s, uint16_t color, uint16_t bg) {
   for (int i = 0; i < s.length(); i++) { tft_dma.drawChar(x + (i * 7), y, s[i], color, bg, font); }
 }
 
-// 螢幕底部兩列（模擬畫面只到 y=191，192 以下全是空白可用）：
-//   y=210 狀態列（可變）  y=222 F Key 速查列（固定不變）
-// 平時兩列都不畫，遊戲畫面下方保持全黑；按 Fn（或任一 F 鍵動作）才亮 3 秒。
-#define STATUS_Y 210
-#define FKEY_Y   222
-// 清除範圍涵蓋兩列的字高(8px)再各留 2px 邊：y=208..231。
-// 不用 fillScreen(一次約 100ms)，這塊 320x24 約 2ms，塞得進 VBLANK。
-#define STATUS_CLEAR_Y 208
-#define STATUS_CLEAR_H 24
+// 螢幕底部三列（模擬畫面只到 y=191，192 以下全是空白可用），等距 12px：
+//   y=206 狀態列（可變）  y=218 / y=230 F Key 速查列（固定不變，F1~F4 / F5~F7）
+// 平時三列都不畫，遊戲畫面下方保持全黑；按 Fn（或任一 F 鍵動作）才亮 3 秒。
+// 上緣不能再往上：磁碟馬達燈在 (305,196) 8x8，佔 y=196..203。
+#define STATUS_Y 206
+#define FKEY_Y   218
+#define FKEY_ROW_H 12
+// 清除範圍：y=204..239（三列字高 8px，上留 2px、下到螢幕底）。
+// 不用 fillScreen(一次約 100ms)，這塊 320x36 約 3ms，塞得進 VBLANK。
+#define STATUS_CLEAR_Y 204
+#define STATUS_CLEAR_H 36
 
-// 字型固定 7px 寬，一列從 x=6 起算最多 44 字 —— 下面這串剛好填滿：
-//   "F1:WRST F2:CRST F3:DISK F4:JOY F5:SPD F7:GRN"
-// 欄位起始值是字元索引(非像素)，鍵名 3 字、功能縮寫接在其後。
-// 註：實機是 Fn+數字，但列首不放 "FN+" 前綴（會吃掉 4 字得砍一項）。
+// 速查列：字型固定 7px 寬，一列從 x=6 起算最多 44 字，切成 4 欄 x 11 字，
+// 兩列平均排開（原本單列 44 字已滿，放不下 F6）。
+// 鍵名 3 字、功能縮寫接在其後。
+// 註：實機是 Fn+數字，但不放 "FN+" 前綴（每項多 3 字，一欄裝不下）。
 // 註：CapsLock 不列 —— 鍵盤上有實體 CAPS 鍵(偽碼 208)可直接按，列出來反而誤導。
-struct FKeyHint { uint8_t col; const char* key; const char* label; };
+#define FKEY_COL_CHARS 11
+struct FKeyHint { uint8_t row; uint8_t col; const char* key; const char* label; };
 static const FKeyHint FKEY_HINTS[] = {
-  {  0, "F1:", "WRST" },   // warm reset
-  {  8, "F2:", "CRST" },   // cold reset + 重載 track0
-  { 16, "F3:", "DISK" },   // 磁碟選單
-  { 24, "F4:", "JOY"  },   // 搖桿/鍵盤
-  { 31, "F5:", "SPD"  },   // 速度循環
-  { 38, "F7:", "GRN"  },   // 彩色/綠螢幕
+  { 0, 0, "F1:", "WRST" },   // warm reset
+  { 0, 1, "F2:", "CRST" },   // cold reset + 重載 track0
+  { 0, 2, "F3:", "DISK" },   // 磁碟選單
+  { 0, 3, "F4:", "JOY"  },   // 搖桿/鍵盤
+  { 1, 0, "F5:", "SPD"  },   // 速度循環
+  { 1, 1, "F6:", "MEM"  },   // 記憶體監視器
+  { 1, 2, "F7:", "GRN"  },   // 彩色/綠螢幕
 };
 
-// 實際把兩列畫出來。只由 updateStatusLine() 呼叫。
+// 實際把三列畫出來。只由 updateStatusLine() 呼叫。
 static void paintStatusLines() {
   char buf[64];
   // 顯示左側：搖桿/鍵盤模式
@@ -969,9 +973,10 @@ static void paintStatusLines() {
 
   // F Key 速查列：鍵名綠、功能縮寫白，沿用上一列「標籤綠、內容亮」的語彙。
   for (uint8_t i = 0; i < sizeof(FKEY_HINTS) / sizeof(FKEY_HINTS[0]); i++) {
-    uint16_t x = 6 + FKEY_HINTS[i].col * 7;
-    drawString(x, FKEY_Y, FKEY_HINTS[i].key, 0x07E0, 0x0000);
-    drawString(x + 21, FKEY_Y, FKEY_HINTS[i].label, 0xFFFF, 0x0000);
+    uint16_t x = 6 + FKEY_HINTS[i].col * FKEY_COL_CHARS * 7;
+    uint16_t y = FKEY_Y + FKEY_HINTS[i].row * FKEY_ROW_H;
+    drawString(x, y, FKEY_HINTS[i].key, 0x07E0, 0x0000);
+    drawString(x + 21, y, FKEY_HINTS[i].label, 0xFFFF, 0x0000);
   }
 }
 
@@ -985,7 +990,7 @@ void updateStatusLine() {
   paintStatusLines();
 }
 
-// 倒數到期就把兩列擦掉。由 Core 1 的 VBLANK 每幀呼叫一次。
+// 倒數到期就把三列擦掉。由 Core 1 的 VBLANK 每幀呼叫一次。
 // 選單開啟時不動手：選單畫面自己佔滿整頁(下緣外框就在 y=228)，擦了會破洞。
 void statusLineTick() {
   if (g_show_menu || g_show_memmon) { g_status_visible = false; return; }   // 選單/監視器的 fillScreen 已經清乾淨了
