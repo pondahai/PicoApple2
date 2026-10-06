@@ -81,6 +81,8 @@ Legacy one-shot path (no loader): run `full_build.bat`, which compiles and flash
 | **Fn + 3** | Disk Menu (F3) — Load `.DSK` files from SD card. |
 | **Fn + 4** | Joy/Key Mode (F4) — Toggle arrow keys between joystick and keyboard. |
 | **Fn + 5** | Cycle Speed (F5) — Switch between 1.0x to 1.5x speed. |
+| **Fn + 6** | Memory Monitor (F6) — Pause and open a hex viewer/editor (8 bytes per row). Esc/F6 to resume. |
+| **Fn + 7** | Color / Green Monitor (F7). |
 
 ## 📁 Key Files & Directories
 
