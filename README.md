@@ -46,7 +46,7 @@
 | **SD 卡 (SPI1)** | SCK / MOSI / MISO / CS | 10 / 11 / 12 / 13 | 連接至 SD 卡模組 |
 | **音效 (Audio)** | Sound Out | 7 | 1-bit PWM 輸出 (需接低通濾波器與放大器) |
 | **鍵盤矩陣** | Data Out / Latch | 15 / 14 | 連接至 74HC595 / 74HC165 |
-| | Clock / Data In | 26 / 27 | |
+| | Clock / Data In | 26 / 27 | `KBD_SHARED_DATA=1` 時 Data In 改為 165 QH 經 1 kΩ 接 GP15，GP27 空出（見 DevLog 2026-10-10） |
 | **選單按鈕** | Up / Down | 9 / 5 | 輔助導航按鈕 (Pull-up) |
 | | Left / Right | 8 / 6 | 搖桿 X 軸模擬 |
 | | Button A / B | 2 / 3 | A:確認 (PB0), B:返回 (PB1) |

@@ -24,7 +24,19 @@
 #define DATA_OUT_PIN     15
 #define LATCH_PIN        14
 #define CLOCK_PIN        26
+// KBD_SHARED_DATA=1：165 QH 經 1kΩ 接到 GP15，與 595 SER 共用（GP27 空出來當 ADC）
+// KBD_SHARED_DATA=0：原接線，QH 接 GP27
+#ifndef KBD_SHARED_DATA
+#define KBD_SHARED_DATA  0
+#endif
+#if KBD_SHARED_DATA
+#define DATA_IN_PIN      DATA_OUT_PIN
+#define KBD_FREE_PIN     27
+#define KBD_MODE_STR     "kbd QH on GP15"
+#else
 #define DATA_IN_PIN      27
+#define KBD_MODE_STR     "kbd QH on GP27"
+#endif
 
 #define BTN_UP    9
 #define BTN_DOWN  5
@@ -725,6 +737,7 @@ void setup() {
   uint32_t irq = spin_lock_blocking(res_lock);
   apple2_init();
   spin_unlock(res_lock, irq);
+  Serial.println("PicoApple2: " KBD_MODE_STR);
   g_core0_ready = true; // 放行 Core 1 開始顯示器/SD 初始化
 }
 
@@ -1056,7 +1069,14 @@ void setup1() {
   gpio_init(DATA_OUT_PIN); gpio_set_dir(DATA_OUT_PIN, GPIO_OUT);
   gpio_init(LATCH_PIN); gpio_set_dir(LATCH_PIN, GPIO_OUT);
   gpio_init(CLOCK_PIN); gpio_set_dir(CLOCK_PIN, GPIO_OUT);
+#if KBD_SHARED_DATA
+  // GP15 平時停在輸入；關掉預設下拉（~50k 會跟 1kΩ 分壓）
+  gpio_disable_pulls(DATA_OUT_PIN); gpio_set_dir(DATA_OUT_PIN, GPIO_IN);
+  // GP27 已割線：留作輸入、無上下拉（之後給 ADC 用）
+  gpio_init(KBD_FREE_PIN); gpio_set_dir(KBD_FREE_PIN, GPIO_IN); gpio_disable_pulls(KBD_FREE_PIN);
+#else
   gpio_init(DATA_IN_PIN); gpio_set_dir(DATA_IN_PIN, GPIO_IN);
+#endif
   pinMode(PIN_DISPLAY_BL, OUTPUT); digitalWrite(PIN_DISPLAY_BL, LOW);
   
   tft_dma.begin();
@@ -1308,8 +1328,17 @@ void scan_matrix() {
   if (menu_p && !last_menu_p) { g_f_key_event = 3; } last_menu_p = menu_p;
   
   for (int row = 0; row < 8; row++) {
-    byte rS = (1 << row); fastWrite(LATCH_PIN, 0); shiftOut(DATA_OUT_PIN, CLOCK_PIN, MSBFIRST, 0); shiftOut(DATA_OUT_PIN, CLOCK_PIN, MSBFIRST, rS);
+    byte rS = (1 << row);
+#if KBD_SHARED_DATA
+    gpio_set_dir(DATA_OUT_PIN, GPIO_OUT);   // 寫 595：RP2040 隔 1kΩ 蓋過 QH
+#endif
+    fastWrite(LATCH_PIN, 0); shiftOut(DATA_OUT_PIN, CLOCK_PIN, MSBFIRST, 0); shiftOut(DATA_OUT_PIN, CLOCK_PIN, MSBFIRST, rS);
     fastWrite(LATCH_PIN, 1); delayMicroseconds(5); fastWrite(LATCH_PIN, 0); delayMicroseconds(1); fastWrite(LATCH_PIN, 1);
+#if KBD_SHARED_DATA
+    // 讀 165：放開 GP15 讓 QH 推過來。接下來 8 個 CLOCK 也會把 QH 推進 595 移位暫存器，
+    // 但下一列（或下一輪掃描）在 LATCH 上升前一定先重寫完整 16 bit，輸出不受影響。
+    gpio_set_dir(DATA_OUT_PIN, GPIO_IN); delayMicroseconds(1);
+#endif
     byte colData = myShiftIn(DATA_IN_PIN, CLOCK_PIN);
     for (int col = 0; col < 8; col++) keyState[row][7 - col] = (colData & (1 << col));
   }

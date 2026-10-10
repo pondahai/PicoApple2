@@ -1,5 +1,22 @@
 # Pico Apple II Emulator - Development Log
 
+## 2026-10-10: 鍵盤 165 QH 改接 GP15（與 595 SER 共用），空出 GP27 給 ADC（編譯通過，待實機驗證 ⏳）
+
+*   **硬體修改**：74HC165 QH 不接 GP27，改串 1 kΩ 接到 GP15（74HC595 SER 同一腳）；GP27 走線割斷，留作 ADC。
+    寫 595 時 GP15 為輸出，隔 1 kΩ 蓋過 QH；讀 165 時 GP15 切輸入，QH 經 1 kΩ 推過來。
+*   **編譯開關 `KBD_SHARED_DATA`**（`PicoApple2.ino` 開頭，預設 0 = 原接線，沒改硬體的機器照常能用）。
+    =1 時：`DATA_IN_PIN` = 15；每列 `shiftOut` 前 `gpio_set_dir(15, OUT)`、`myShiftIn` 前切 IN 並等 1 µs；
+    初始化 `gpio_disable_pulls(15)`（預設 ~50k 下拉會跟 1 kΩ 分壓）；GP27 設輸入、無上下拉；掃描結束 GP15 停在輸入。
+    命令列：`--build-property "compiler.cpp.extra_flags=-DKBD_SHARED_DATA=1"`。
+*   **開機序列埠印出 `PicoApple2: kbd QH on GP15`／`GP27`**，燒錄後可確認是哪一版。
+*   **⚠️ 共用 CLOCK 的時序陷阱（已檢查，順序不用改）**：讀 165 的 8 個 CLOCK 也會把 QH 推進 595 移位暫存器。
+    逐步追蹤 `scan_matrix()`：每列 LATCH 第二次上升（載入 165 用）之前沒有任何 CLOCK，暫存器內容仍是剛寫的 16 bit；
+    讀完 165 後下一次 LATCH 上升一定在下一列重寫完整 16 bit 之後；迴圈結束多打的那個 CLOCK 之後也要到下一輪寫滿才鎖存。
+    **之後若改掃描順序，絕不能在讀完 165 後、重寫 595 前拉 LATCH。**
+*   **編譯環境備忘**：ROM 不在 repo（`.gitignore` 排除 `*.rom`），來源是 `pico_apple2_roms.zip`
+    （disk2_p6.rom 全 0、程式未引用）。`boot_smoke` 寫死 `C:\Users\Dell\...\MASTER.DSK`，本機沒有會失敗，用 `BOOT_DSK=` 指定。
+    `gen_app_ld.py` 會把本機 Arduino15 路徑寫進 `memmap_app_arduino.ld` 的註解，換機器編譯後記得還原別 commit。
+
 ## 2026-10-06: F6 記憶體監視器（移植自 apple2emu，實機驗證通過 ✅）
 
 按 **F6**（機身 **Fn+6**）暫停模擬、整頁顯示 hex 編輯器；再按 F6 或 Esc 恢復。
