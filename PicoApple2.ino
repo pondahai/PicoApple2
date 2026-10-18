@@ -23,7 +23,20 @@
 #define PIN_JACK_SND     7
 #define DATA_OUT_PIN     15
 #define LATCH_PIN        14
+// KBD_CLK_ON_LCD_DC=1：595/165 的 CLOCK 改接 LCD D/C（GP20），GP26 空出（高阻抗）。
+//   掃描時 LCD 必須靜止（DMA 排空、CS 高），見 scan_matrix()。
+// KBD_CLK_ON_LCD_DC=0：原接線，CLOCK 接 GP26
+#ifndef KBD_CLK_ON_LCD_DC
+#define KBD_CLK_ON_LCD_DC 0
+#endif
+#if KBD_CLK_ON_LCD_DC
+#define CLOCK_PIN        PIN_DISPLAY_DC
+#define KBD_FREE_CLK_PIN 26
+#define KBD_CLK_STR      ", CLK on GP20 (LCD D/C)"
+#else
 #define CLOCK_PIN        26
+#define KBD_CLK_STR      ", CLK on GP26"
+#endif
 // KBD_SHARED_DATA=1：165 QH 經 1kΩ 接到 GP15，與 595 SER 共用（GP27 空出來當 ADC）
 // KBD_SHARED_DATA=0：原接線，QH 接 GP27
 #ifndef KBD_SHARED_DATA
@@ -442,8 +455,15 @@ inline void fastWrite(uint pin, bool val) { gpio_put(pin, val); }
 inline bool fastRead(uint pin) { return gpio_get(pin); }
 byte myShiftIn(uint8_t dP, uint8_t cP) {
   byte data = 0;
-  for (int i = 0; i < 8; i++) { if (fastRead(dP)) { data |= (1 << i); } fastWrite(cP, 1); delayMicroseconds(1); fastWrite(cP, 0); }
+  for (int i = 0; i < 8; i++) { if (fastRead(dP)) { data |= (1 << i); } fastWrite(cP, 1); delayMicroseconds(1); fastWrite(cP, 0); delayMicroseconds(1); }
   return data;
+}
+// MSB first，半週期 1 µs。取代 Arduino shiftOut（無延遲，CLOCK 掛在 LCD D/C 長線上時邊緣太快）
+void shiftOutSlow(uint8_t dP, uint8_t cP, uint8_t val) {
+  for (int i = 7; i >= 0; i--) {
+    fastWrite(dP, (val >> i) & 1); delayMicroseconds(1);
+    fastWrite(cP, 1); delayMicroseconds(1); fastWrite(cP, 0);
+  }
 }
 
 // 偵測到 SD 卡被拔出（或存取失敗）：作廢檔案系統並退片，讓模擬器回到無媒體狀態。
@@ -737,7 +757,7 @@ void setup() {
   uint32_t irq = spin_lock_blocking(res_lock);
   apple2_init();
   spin_unlock(res_lock, irq);
-  Serial.println("PicoApple2: " KBD_MODE_STR);
+  Serial.println("PicoApple2: " KBD_MODE_STR KBD_CLK_STR);
   g_core0_ready = true; // 放行 Core 1 開始顯示器/SD 初始化
 }
 
@@ -1068,7 +1088,14 @@ void setup1() {
   g_audio_pool = alarm_pool_create_with_unused_hardware_alarm(4);
   gpio_init(DATA_OUT_PIN); gpio_set_dir(DATA_OUT_PIN, GPIO_OUT);
   gpio_init(LATCH_PIN); gpio_set_dir(LATCH_PIN, GPIO_OUT);
+#if KBD_CLK_ON_LCD_DC
+  // CLOCK = LCD D/C，由 tft_dma.begin() 初始化（預設 4 mA、慢斜率，不要調高）。
+  // GP26 已與鍵盤無關：輸入、無上下拉
+  gpio_init(KBD_FREE_CLK_PIN); gpio_set_dir(KBD_FREE_CLK_PIN, GPIO_IN); gpio_disable_pulls(KBD_FREE_CLK_PIN);
+#else
   gpio_init(CLOCK_PIN); gpio_set_dir(CLOCK_PIN, GPIO_OUT);
+#endif
+  gpio_put(LATCH_PIN, 1);   // LATCH 閒置停高（165 在移位模式，LCD 翻 D/C 時不會誤載入）
 #if KBD_SHARED_DATA
   // GP15 平時停在輸入；關掉預設下拉（~50k 會跟 1kΩ 分壓）
   gpio_disable_pulls(DATA_OUT_PIN); gpio_set_dir(DATA_OUT_PIN, GPIO_IN);
@@ -1326,13 +1353,20 @@ static void mmService() {
 void scan_matrix() {
   static bool last_menu_p = false; bool menu_p = (digitalRead(BTN_MENU) == LOW);
   if (menu_p && !last_menu_p) { g_f_key_event = 3; } last_menu_p = menu_p;
-  
+
+#if KBD_CLK_ON_LCD_DC
+  // CLOCK 就是 LCD D/C：掃描期間 LCD 不能在傳輸。所有畫面更新都在 Core 1，與此處同核，
+  // 所以只要先排空 DMA + SPI 移位、拉 CS 高，LCD 就不會取樣 D/C。掃完還原 D/C 電位。
+  tft_dma.waitTransferDone();
+  gpio_put(PIN_DISPLAY_CS, 1);
+  const bool saved_dc = gpio_get_out_level(PIN_DISPLAY_DC);
+#endif
   for (int row = 0; row < 8; row++) {
     byte rS = (1 << row);
 #if KBD_SHARED_DATA
     gpio_set_dir(DATA_OUT_PIN, GPIO_OUT);   // 寫 595：RP2040 隔 1kΩ 蓋過 QH
 #endif
-    fastWrite(LATCH_PIN, 0); shiftOut(DATA_OUT_PIN, CLOCK_PIN, MSBFIRST, 0); shiftOut(DATA_OUT_PIN, CLOCK_PIN, MSBFIRST, rS);
+    fastWrite(LATCH_PIN, 0); shiftOutSlow(DATA_OUT_PIN, CLOCK_PIN, 0); shiftOutSlow(DATA_OUT_PIN, CLOCK_PIN, rS);
     fastWrite(LATCH_PIN, 1); delayMicroseconds(5); fastWrite(LATCH_PIN, 0); delayMicroseconds(1); fastWrite(LATCH_PIN, 1);
 #if KBD_SHARED_DATA
     // 讀 165：放開 GP15 讓 QH 推過來。接下來 8 個 CLOCK 也會把 QH 推進 595 移位暫存器，
@@ -1343,6 +1377,9 @@ void scan_matrix() {
     for (int col = 0; col < 8; col++) keyState[row][7 - col] = (colData & (1 << col));
   }
   fastWrite(CLOCK_PIN, 1); delayMicroseconds(2); fastWrite(CLOCK_PIN, 0);
+#if KBD_CLK_ON_LCD_DC
+  gpio_put(PIN_DISPLAY_DC, saved_dc);   // LCD 驅動程式的 D/C 狀態維持不變
+#endif
   
   bool mat_joy_up = false, mat_joy_down = false, mat_joy_left = false, mat_joy_right = false, mat_joy_btn0 = false, mat_joy_btn1 = false;
   for (int r = 0; r < 8; r++) { for (int c = 0; c < 8; c++) { if (keyState[r][c]) { uint8_t k = keymap_base[r][c]; if (k == 209) mat_joy_up = true; if (k == 210) mat_joy_down = true; if (k == 211) mat_joy_left = true; if (k == 212) mat_joy_right = true; if (k == 213) mat_joy_btn0 = true; if (k == 214) mat_joy_btn1 = true; } } }

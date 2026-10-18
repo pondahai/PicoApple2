@@ -1,5 +1,23 @@
 # Pico Apple II Emulator - Development Log
 
+## 2026-10-18: 鍵盤 CLOCK 改接 LCD D/C（GP20），空出 GP26（實機驗證通過 ✅）
+
+*   **硬體修改**：595/165 的 CLOCK 不接 GP26，改接 LCD D/C（GP20）。LATCH（GP14）同時接 595 RCLK 與 165 SH/LD，閒置停高。
+*   **為什麼可共用**：LCD 只在 CS 低時於 SCK 邊緣取樣 D/C；平常 LCD 翻 D/C 只會讓 595/165 多移位，LATCH 沒動 595 輸出就不變，165 每列都重新載入。
+*   **編譯開關 `KBD_CLK_ON_LCD_DC`**（預設 0 = 原接線）。新硬體要同時開 `KBD_SHARED_DATA=1`：
+    `--build-property "compiler.cpp.extra_flags=-DKBD_SHARED_DATA=1 -DKBD_CLK_ON_LCD_DC=1"`。開機序列埠印 `..., CLK on GP20 (LCD D/C)`。
+*   **`scan_matrix()`**：開頭 `tft_dma.waitTransferDone()`（DMA + SPI BSY 都排空）→ CS 拉高 → 記下 D/C 電位；掃完（含尾端多打的 CLOCK）還原 D/C。
+    所有畫面繪製都在 Core 1，跟 `scan_matrix()` 同核，所以不需要跨核同步。
+*   **`shiftOut` 改成 `shiftOutSlow`**（半週期 1 µs），`myShiftIn` 低半週期也補 1 µs。GP20 驅動力／斜率維持預設（不設 12 mA、不開快斜率）。
+*   **LATCH 仍打兩次脈衝**：先上升鎖存 595，等 5 µs 列輸出穩定，再拉低 1 µs 載入 165。只打一次低→高的話，165 會在 595 輸出更新之前載入，讀到上一列。
+*   GP26 設輸入、關上下拉；`setup1()` 不再 `gpio_init(CLOCK_PIN)`（GP20 交給 `tft_dma.begin()`），並把 LATCH 初始化為高。
+*   **GP20 運作筆記**：一直是 SIO GPIO 輸出（非 SPI 功能腳），兩個用途都在 Core 1 用 `gpio_put` 輪流控制。
+    *   當 LCD D/C：命令 D/C=0、資料 D/C=1；`startFrame` 送完 0x2C 後 D/C=1，DMA 在 CS 低時送整條掃描線。
+        此時 595/165 也被 D/C 打時脈，但 LATCH 停高 → 595 輸出不變，165 下次掃描重新載入，無影響。
+    *   當鍵盤 CLOCK：`scan_matrix()`（VBLANK／選單／F6 約 200 Hz）中排空 DMA → CS 高 → 存 D/C → 每列 16 clk 寫 595、LATCH 兩脈衝、8 clk 讀 165 → 還原 D/C。
+        LCD 下次送命令本來就會自己設 D/C 再拉 CS，狀態銜接無縫。整次掃描約 0.6 ms，落在 VBLANK，不與畫面傳輸重疊。
+*   **燒錄方式**：以 `build_offset.bat` 流程（加兩個 `-D` 開關）產生 `PicoApple2_standalone.uf2`，放 SD 根目錄由 retro_loader 載入；舊檔留作 `.bak`。
+
 ## 2026-10-10: 鍵盤 165 QH 改接 GP15（與 595 SER 共用），空出 GP27 給 ADC（編譯通過，待實機驗證 ⏳）
 
 *   **硬體修改**：74HC165 QH 不接 GP27，改串 1 kΩ 接到 GP15（74HC595 SER 同一腳）；GP27 走線割斷，留作 ADC。
