@@ -27,7 +27,7 @@
 //   掃描時 LCD 必須靜止（DMA 排空、CS 高），見 scan_matrix()。
 // KBD_CLK_ON_LCD_DC=0：原接線，CLOCK 接 GP26
 #ifndef KBD_CLK_ON_LCD_DC
-#define KBD_CLK_ON_LCD_DC 0
+#define KBD_CLK_ON_LCD_DC 1   // 預設現行接線（rp2040-retro-handheld HARDWARE.md §2.2）
 #endif
 #if KBD_CLK_ON_LCD_DC
 #define CLOCK_PIN        PIN_DISPLAY_DC
@@ -40,7 +40,7 @@
 // KBD_SHARED_DATA=1：165 QH 經 1kΩ 接到 GP15，與 595 SER 共用（GP27 空出來當 ADC）
 // KBD_SHARED_DATA=0：原接線，QH 接 GP27
 #ifndef KBD_SHARED_DATA
-#define KBD_SHARED_DATA  0
+#define KBD_SHARED_DATA  1     // 預設現行接線；舊機器編譯時給 =0
 #endif
 #if KBD_SHARED_DATA
 #define DATA_IN_PIN      DATA_OUT_PIN
