@@ -111,9 +111,11 @@
     ```bash
     .\build_offset.bat
     ```
-    產出 **`build_offset\PicoApple2_standalone.uf2`** —— 這是要用的檔案。放進 SD 卡根目錄給
-    [rp2040-retro-loader](https://github.com/pondahai/rp2040-retro-loader)，或直接拖進 `RPI-RP2`、
-    或 `picotool load -v -x` 用 USB 燒。兩種路徑吃同一個檔。
+    產出兩個檔，命名規則與其他 retro app 一致：
+    *   **`build_offset\PicoApple2.ino.uf2`** —— 放進 SD 卡根目錄給
+        [rp2040-retro-loader](https://github.com/pondahai/rp2040-retro-loader) 的選單用（封面配 `PicoApple2.ino.RAW`）。
+    *   **`build_offset\PicoApple2_standalone.uf2`** —— 夾了跳板，只給 USB 燒（拖進 `RPI-RP2` 或 `picotool load -v -x`）。
+        載入器其實也吃得下這個檔，但 SD 卡上請統一用選單版的名字。
 
     > ⚠️ **USB 燒 standalone 會蓋掉 loader**：它前 16KB 是跳板，與 loader 同位址。
     > 板上已裝 loader 時，USB 只燒同目錄的 `build_offset\PicoApple2.ino.uf2`（純 body，只寫 `0x10004000` 以後），
@@ -139,7 +141,7 @@
 .\build_offset.bat
 ```
 
-產出 `build_offset\PicoApple2_standalone.uf2`。這個檔案兩種用法都吃得下：放進 SD 卡根目錄給載入器，或直接用 USB 燒進去。**這已是本專案的預設編譯流程**（見上面「快速編譯與上傳」）；`full_build.bat` 保留為不搭配載入器時的備援，兩支腳本共用同一份 `.a`。
+產出 `build_offset\PicoApple2.ino.uf2`（放 SD 卡給載入器）與 `build_offset\PicoApple2_standalone.uf2`（USB 燒）。SD 卡上統一用 `PicoApple2.ino.uf2` 這個名字；standalone 檔雖然也能被載入器讀，但會讓選單名稱與其他 app 不一致。**這已是本專案的預設編譯流程**（見上面「快速編譯與上傳」）；`full_build.bat` 保留為不搭配載入器時的備援，兩支腳本共用同一份 `.a`。
 
 這支腳本**不需要你在 Arduino sketchbook 裡安裝 `Apple2Core` 程式庫**，它會自己生成一份（見下面「不依賴 sketchbook」）。
 

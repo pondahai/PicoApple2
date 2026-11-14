@@ -25,11 +25,14 @@ set "PYTHONIOENCODING=utf-8"
 ::     build_offset.bat <loader repo path>
 ::
 :: Outputs (all under build_offset\):
-::     PicoApple2.ino.uf2          body only, first 16KB empty - NOT flashable alone
-::     PicoApple2_standalone.uf2   trampoline + body - this is the one to use
+::     PicoApple2.ino.uf2          body only, first 16KB empty - for the SD card
+::                                 (loader menu). NOT flashable alone over USB.
+::     PicoApple2_standalone.uf2   trampoline + body - for USB flashing only
 ::
-:: This script does not flash. The standalone file works both ways: drop it
-:: in the SD card root for the loader, or picotool load -v -x it directly.
+:: This script does not flash. Naming rule shared by every retro app: the SD
+:: card gets the menu name (PicoApple2.ino.uf2, cover PicoApple2.ino.RAW);
+:: the _standalone name is for USB only. The loader would also accept the
+:: standalone file, but keep the names consistent across apps.
 :: ===========================================================================
 
 set "SCRIPT_DIR=%~dp0"
@@ -147,9 +150,11 @@ echo.
 echo ========================================================
 echo SUCCESS
 echo ========================================================
-echo   %OUT_DIR%\PicoApple2_standalone.uf2
+echo   %OUT_DIR%\PicoApple2.ino.uf2          for the SD card (loader menu)
+echo   %OUT_DIR%\PicoApple2_standalone.uf2   flashable over USB
 echo.
-echo   Put it in the SD card root for the loader, or flash it directly:
+echo   SD card: python retro_sync.py push "%OUT_DIR%\PicoApple2.ino.uf2"
+echo   USB, no loader on the board:
 echo     picotool load -v -x "%OUT_DIR%\PicoApple2_standalone.uf2"
 echo.
 echo   Note: picotool load -x is a soft reset, so the loader passes straight
