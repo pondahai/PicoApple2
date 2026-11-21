@@ -1097,8 +1097,9 @@ void setup1() {
 #endif
   gpio_put(LATCH_PIN, 1);   // LATCH 閒置停高（165 在移位模式，LCD 翻 D/C 時不會誤載入）
 #if KBD_SHARED_DATA
-  // GP15 平時停在輸入；關掉預設下拉（~50k 會跟 1kΩ 分壓）
-  gpio_disable_pulls(DATA_OUT_PIN); gpio_set_dir(DATA_OUT_PIN, GPIO_IN);
+  // GP15 平時停在輸入；啟用內部下拉（~50k，與 1kΩ 分壓仍有 ~3.24V，並聯外部下拉亦有 ~3.17V），
+  // 防止未接鍵盤硬體時浮接誤觸。
+  gpio_pull_down(DATA_OUT_PIN); fastWrite(DATA_OUT_PIN, 0); gpio_set_dir(DATA_OUT_PIN, GPIO_IN);
   // GP27 已割線：留作輸入、無上下拉（之後給 ADC 用）
   gpio_init(KBD_FREE_PIN); gpio_set_dir(KBD_FREE_PIN, GPIO_IN); gpio_disable_pulls(KBD_FREE_PIN);
 #else
@@ -1369,8 +1370,10 @@ void scan_matrix() {
     fastWrite(LATCH_PIN, 0); shiftOutSlow(DATA_OUT_PIN, CLOCK_PIN, 0); shiftOutSlow(DATA_OUT_PIN, CLOCK_PIN, rS);
     fastWrite(LATCH_PIN, 1); delayMicroseconds(5); fastWrite(LATCH_PIN, 0); delayMicroseconds(1); fastWrite(LATCH_PIN, 1);
 #if KBD_SHARED_DATA
-    // 讀 165：放開 GP15 讓 QH 推過來。接下來 8 個 CLOCK 也會把 QH 推進 595 移位暫存器，
+    // 讀 165：先主動拉低放電再放開 GP15 讓 QH 推過來（避免未接鍵盤時殘留 Row 0 高電位）。
+    // 接下來 8 個 CLOCK 也會把 QH 推進 595 移位暫存器，
     // 但下一列（或下一輪掃描）在 LATCH 上升前一定先重寫完整 16 bit，輸出不受影響。
+    fastWrite(DATA_OUT_PIN, 0);
     gpio_set_dir(DATA_OUT_PIN, GPIO_IN); delayMicroseconds(1);
 #endif
     byte colData = myShiftIn(DATA_IN_PIN, CLOCK_PIN);
