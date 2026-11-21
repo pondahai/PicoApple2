@@ -30,6 +30,7 @@ arduino-cli.exe
 .vscode/
 build/
 build_offset/
+loader_offset/memmap_app_arduino.ld
 
 # OS Files
 Thumbs.db
